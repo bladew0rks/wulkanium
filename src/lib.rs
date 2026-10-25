@@ -17,6 +17,7 @@ pub mod sampler;
 pub mod shader_util;
 pub mod shadow;
 pub mod texconv;
+pub mod texlist;
 pub mod vcs;
 pub mod d3dbc;
 pub mod d3d2wgsl;

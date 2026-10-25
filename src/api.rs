@@ -39,6 +39,8 @@ pub struct Texture {
     pub flags: i32,
     pub depth_target: bool,
     pub name: String,
+    /// texture group (TEXTURE_GROUP_*), for mat_texture_list
+    pub group: String,
     pub levels: Vec<Option<Image>>,
     /// faces 1..5 of a cube
     pub faces: Vec<Vec<Option<Image>>>,
@@ -1546,6 +1548,9 @@ pub fn present() {
             log::line("--- end of frame capture ---");
         }
         s.frames += 1;
+        if crate::texlist::begin_export(s.frames) {
+            crate::texlist::export(s.frames, &texture_table(), crate::device::back_buffer_size());
+        }
         if capture {
             s.trace_from = s.frames;
             log::line(&format!("--- frame capture (frame {}) ---", s.frames));
@@ -1656,8 +1661,9 @@ unsafe extern "C" fn compare_snapshots(_t: *mut c_void, a: i16, b: i16) -> i32 {
 
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "C" fn create_texture(_t: *mut c_void, w: i32, h: i32, depth: i32, fmt: i32, mips: i32, copies: i32, flags: i32, name: *const c_char, _group: *const c_char) -> i32 {
-    let name = if name.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned() };
+unsafe extern "C" fn create_texture(_t: *mut c_void, w: i32, h: i32, depth: i32, fmt: i32, mips: i32, copies: i32, flags: i32, name: *const c_char, group: *const c_char) -> i32 {
+    let str = |p: *const c_char| if p.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned() };
+    let (name, group) = (str(name), str(group));
     static CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if flags & 0xa != 0 || CREATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
         log::line(&format!("CreateTexture '{name}' {w}x{h}x{depth} fmt {fmt} mips {mips} copies {copies} flags {flags:#x}"));
@@ -1665,7 +1671,7 @@ unsafe extern "C" fn create_texture(_t: *mut c_void, w: i32, h: i32, depth: i32,
     with(|s| {
         let id = s.next_texture;
         s.next_texture += 1;
-        texture_table().insert(id, Texture { width: w, height: h, depth, format: fmt, mips, copies, flags, name, filter: [1, 1], ..Default::default() });
+        texture_table().insert(id, Texture { width: w, height: h, depth, format: fmt, mips, copies, flags, name, group, filter: [1, 1], ..Default::default() });
         id
     })
 }
@@ -1676,11 +1682,12 @@ unsafe extern "C" fn create_textures(t: *mut c_void, handles: *mut i32, count: i
         unsafe { *handles.add(i) = id };
     }
 }
-unsafe extern "C" fn create_depth_texture(_t: *mut c_void, fmt: i32, w: i32, h: i32, _name: *const c_char, _texture: bool) -> i32 {
+unsafe extern "C" fn create_depth_texture(_t: *mut c_void, fmt: i32, w: i32, h: i32, name: *const c_char, _texture: bool) -> i32 {
+    let name = if name.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned() };
     with(|s| {
         let id = s.next_texture;
         s.next_texture += 1;
-        texture_table().insert(id, Texture { width: w, height: h, depth: 1, format: fmt, mips: 1, copies: 1, depth_target: true, ..Default::default() });
+        texture_table().insert(id, Texture { width: w, height: h, depth: 1, format: fmt, mips: 1, copies: 1, depth_target: true, name, group: "RenderTargets".into(), ..Default::default() });
         id
     })
 }
@@ -2311,6 +2318,7 @@ unsafe extern "C" fn copy_rt_to_texture_ex(_t: *mut c_void, dst: i32, id: i32, s
 }
 unsafe extern "C" fn bind_texture(_t: *mut c_void, sampler: i32, id: i32) {
     with(|s| {
+        crate::texlist::note_bind(id);
         if let Some(b) = s.bound_textures.get_mut(sampler as usize) {
             if *b != id {
                 s.border_clamp &= !(1 << sampler);
@@ -2973,29 +2981,32 @@ unsafe extern "C" fn change_video_mode(_t: *mut c_void, info: *const ShaderDevic
     crate::device::change_video_mode(&info);
 }
 
-/// NULL, like dx9 with the list off (filling it needs the engine's KeyValues)
-unsafe extern "C" fn no_texture_list(_t: *mut c_void) -> usize {
-    0
+unsafe extern "C" fn texture_list(_t: *mut c_void) -> *mut c_void {
+    crate::texlist::list()
 }
-unsafe extern "C" fn texture_list_fresh(_t: *mut c_void, _frames: i32) -> bool {
-    false
+unsafe extern "C" fn texture_list_fresh(_t: *mut c_void, frames: i32) -> bool {
+    crate::texlist::fresh(frames)
 }
-static DEBUG_TEXTURE_RENDERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// returns the previous state
 unsafe extern "C" fn set_debug_texture_rendering(_t: *mut c_void, on: bool) -> bool {
-    DEBUG_TEXTURE_RENDERING.swap(on, std::sync::atomic::Ordering::Relaxed)
+    crate::texlist::RENDERING.swap(on, std::sync::atomic::Ordering::Relaxed)
+}
+unsafe extern "C" fn enable_get_all_textures(_t: *mut c_void, on: bool) {
+    crate::texlist::ALL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+/// memory of one texture with its mips, faces and slices
+pub fn texture_bytes(t: &Texture) -> u64 {
+    let base = image_bytes(t.format, t.width, t.height) as u64 * t.depth.max(1) as u64;
+    let faces = if t.flags & 0x1 != 0 { 6 } else { 1 };
+    let chain = if t.mips > 1 { base * 4 / 3 } else { base };
+    chain * faces
 }
 /// bytes of all loaded textures (also used for bound-last-frame), or picmip estimates
 unsafe extern "C" fn texture_memory_used(_t: *mut c_void, kind: i32) -> i32 {
     let total: u64 = {
         texture_table()
             .values()
-            .map(|t| {
-                let base = image_bytes(t.format, t.width, t.height) as u64 * t.depth.max(1) as u64;
-                let faces = if t.flags & 0x1 != 0 { 6 } else { 1 };
-                let chain = if t.mips > 1 { base * 4 / 3 } else { base };
-                chain * faces
-            })
+            .map(texture_bytes)
             .sum()
     };
     let v = match kind {
@@ -3006,16 +3017,8 @@ unsafe extern "C" fn texture_memory_used(_t: *mut c_void, kind: i32) -> i32 {
     v.min(i32::MAX as u64) as i32
 }
 unsafe extern "C" fn enable_debug_texture_list(_t: *mut c_void, on: bool) {
-    if on {
-        with(|s| {
-            if s.trace_from == u64::MAX || s.frames > s.trace_from {
-                s.trace_from = s.frames + 1;
-                log::line(&format!("frame capture armed for frame {}", s.frames + 1));
-            }
-        });
-    }
+    crate::texlist::ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
-unsafe extern "C" fn ignore_bool(_t: *mut c_void, _b: bool) {}
 
 pub fn debug_texture_info_interface() -> crate::Interface {
     use crate::vtables::debug_texture_info::{slot as s, stubs};
@@ -3024,8 +3027,8 @@ pub fn debug_texture_info_interface() -> crate::Interface {
         stubs(),
         &[
             (s::EnableDebugTextureList, f(enable_debug_texture_list as *const ())),
-            (s::EnableGetAllTextures, f(ignore_bool as *const ())),
-            (s::GetDebugTextureList, f(no_texture_list as *const ())),
+            (s::EnableGetAllTextures, f(enable_get_all_textures as *const ())),
+            (s::GetDebugTextureList, f(texture_list as *const ())),
             (s::GetTextureMemoryUsed, f(texture_memory_used as *const ())),
             (s::IsDebugTextureListFresh, f(texture_list_fresh as *const ())),
             (s::SetDebugTextureRendering, f(set_debug_texture_rendering as *const ())),
