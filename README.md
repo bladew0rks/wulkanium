@@ -45,6 +45,17 @@ Copy `target/<triple>/release/shaderapiwgpu.dll` to `GarrysMod/bin/win64/` and l
 | Page Up / Page Down | DLSS input view / jitter pattern |
 | Scroll Lock | Shadow map view |
 
+## Benchmarking
+
+`addon/` is a small Lua addon (copy it to `garrysmod/addons/wulkanium_bench/`) for comparing
+renderers from the same spot:
+
+| Command | Action |
+|---|---|
+| `bench_save` | save your position and view for this map |
+| `bench_lock` / `bench_unlock` | teleport there and freeze, or release |
+| `bench_run [seconds] [warmup]` | time frames: avg fps, 1% low, worst frame |
+
 ## Tests
 
 ```sh
