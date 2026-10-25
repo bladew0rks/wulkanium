@@ -47,6 +47,9 @@ const PIPELINE_CACHE_FILE: &str = "shaderapiwgpu.pipelinecache";
 const MAX_QUERIES: u32 = 4096;
 
 /// run the recorded part of the frame without presenting (ReadPixels)
+/// ns the render thread spent drawing frames, since the last periodic log line
+pub static RENDER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// work for the render thread, in order
 enum Job {
     Present(Frame),
@@ -91,7 +94,9 @@ fn queue() -> Option<std::sync::mpsc::SyncSender<Job>> {
 /// hand a finished frame to the render thread
 pub fn present(frame: Frame) {
     if let Some(q) = queue() {
+        let t = std::time::Instant::now();
         let _ = q.send(Job::Present(frame));
+        crate::api::PRESENT_WAIT_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -517,7 +522,9 @@ fn present_now(frame: Frame) {
     }
     if let Some(Ok(r)) = g.as_mut() {
         // a panic must not unwind into the game
+        let t = std::time::Instant::now();
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.draw(frame, true))).is_ok();
+        RENDER_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         if !ok {
             log::line("renderer: panicked while drawing; rendering disabled");
             *g = Some(Err("panicked".into()));
@@ -1026,16 +1033,17 @@ impl Renderer {
             Full { id: i32, version: u64, faces: Vec<Vec<Option<Image>>>, signed: bool, volume: bool, desc: String },
             Partial { id: i32, version: u64, rects: Vec<(u32, u32, [u32; 4], Vec<u8>)> },
         }
-        let jobs: Vec<Job> = crate::api::with_state(|s| {
+        let jobs: Vec<Job> = (|| {
+            let mut table = crate::api::texture_table();
             let mut bytes = 0usize;
             let mut seen = rustc_hash::FxHashSet::default();
             let mut jobs = Vec::new();
-            let eager: Vec<i32> = s.textures.keys().copied().collect();
+            let eager: Vec<i32> = table.keys().copied().collect();
             let mut queue = |id: i32, budget: usize, bytes: &mut usize| {
                 if id == 0 || !seen.insert(id) || *bytes > budget {
                     return;
                 }
-                let Some(t) = s.textures.get_mut(&id) else { return };
+                let Some(t) = table.get_mut(&id) else { return };
                 let gpu = self.textures.get(&id);
                 let stale = gpu.is_none_or(|g| g.version != t.version) && self.failed.get(&id) != Some(&t.version);
                 if !stale || t.version == 0 {
@@ -1078,7 +1086,7 @@ impl Renderer {
                 queue(id, EAGER_BUDGET, &mut eager_bytes);
             }
             jobs
-        });
+        })();
         let n = jobs.len();
         let mut tex_bytes = 0usize;
         for job in jobs {
@@ -1610,9 +1618,14 @@ impl Renderer {
                 _ => {}
             }
         }
-        let src_sizes: HashMap<i32, (u32, u32)> = crate::api::with_state(|s| copy_srcs.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
-        let sizes: HashMap<i32, (u32, u32)> = crate::api::with_state(|s| ids.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
-        let depth_sizes: Vec<(i32, (u32, u32))> = crate::api::with_state(|s| depth_ids.iter().filter_map(|id| s.textures.get(id).filter(|t| crate::api::is_depth_format(t.format)).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
+        let (src_sizes, sizes, depth_sizes) = {
+            let table = crate::api::texture_table();
+            let size = |id: &i32| table.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)));
+            let src: HashMap<i32, (u32, u32)> = copy_srcs.iter().filter_map(size).collect();
+            let rts: HashMap<i32, (u32, u32)> = ids.iter().filter_map(size).collect();
+            let depth: Vec<(i32, (u32, u32))> = depth_ids.iter().filter(|id| table.get(id).is_some_and(|t| crate::api::is_depth_format(t.format))).filter_map(size).collect();
+            (src, rts, depth)
+        };
         for (id, size) in depth_sizes {
             if self.shadow_maps.get(&id).is_none_or(|m| m.size != size) {
                 let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1632,7 +1645,11 @@ impl Renderer {
             }
         }
         let (tex_uploads, tex_bytes) = self.sync_textures(&used);
-        let (states, aniso): (HashMap<i32, ([i32; 2], [i32; 3])>, i32) = crate::api::with_state(|s| (used.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.filter, t.wrap)))).collect(), s.anisotropy));
+        let states: HashMap<i32, ([i32; 2], [i32; 3])> = {
+            let table = crate::api::texture_table();
+            used.iter().filter_map(|id| table.get(id).map(|t| (*id, (t.filter, t.wrap)))).collect()
+        };
+        let aniso = crate::api::ANISOTROPY.load(std::sync::atomic::Ordering::Relaxed);
         self.anisotropy = aniso;
         let t_sync = cpu_start.elapsed().as_secs_f32() * 1000.0;
         self.target(BACK, (w, h));
@@ -1726,6 +1743,15 @@ impl Renderer {
         let mut target = BACK;
         let mut draw_index = 0usize;
         let mut prepared: Vec<Option<(wgpu::RenderPipeline, wgpu::BindGroup)>> = Vec::new();
+        struct Last<'a> {
+            d: &'a DrawCmd,
+            mv: bool,
+            samples: u32,
+            target: i32,
+            pipe: Option<(wgpu::RenderPipeline, Arc<SamplerSig>)>,
+            bind: Option<wgpu::BindGroup>,
+        }
+        let mut last: Option<Last> = None;
         let mut failed_draws = 0usize;
         for c in &frame.cmds {
             match c {
@@ -1733,8 +1759,21 @@ impl Renderer {
                 Cmd::Draw(d) => {
                     let mv = target == BACK && scene_end.is_some_and(|e| draw_index <= e);
                     draw_index += 1;
-                    let p = self.pipeline(d, mv, if target == BACK { samples } else { 1 }).map(|p| (p.pipeline.clone(), p.sig.clone()));
-                    prepared.push(p.map(|(pipeline, sig)| (pipeline, self.bind_group(&sig, d, target, &states))));
+                    let draw_samples = if target == BACK { samples } else { 1 };
+                    // consecutive draws mostly share pipeline and textures: reuse without hashing
+                    let same_pipe = last.as_ref().is_some_and(|l: &Last| l.mv == mv && l.samples == draw_samples && same_pipeline(l.d, d));
+                    let p = if same_pipe {
+                        last.as_ref().unwrap().pipe.clone()
+                    } else {
+                        self.pipeline(d, mv, draw_samples).map(|p| (p.pipeline.clone(), p.sig.clone()))
+                    };
+                    let same_tex = same_pipe && last.as_ref().is_some_and(|l| l.target == target && l.d.textures == d.textures && l.d.border == d.border && l.d.filter_override == d.filter_override);
+                    let entry = match &p {
+                        Some((pipeline, sig)) => Some((pipeline.clone(), if same_tex { last.as_ref().unwrap().bind.clone().unwrap() } else { self.bind_group(sig, d, target, &states) })),
+                        None => None,
+                    };
+                    last = Some(Last { d, mv, samples: draw_samples, target, pipe: p, bind: entry.as_ref().map(|e| e.1.clone()) });
+                    prepared.push(entry);
                     if prepared.last().unwrap().is_none() {
                         failed_draws += 1;
                         if frame.capture {
@@ -1746,6 +1785,7 @@ impl Renderer {
             }
         }
         let t_prepare = cpu_start.elapsed().as_secs_f32() * 1000.0;
+        drop(last);
         let rect_buf = self.buffer("blit rects", bytemuck::cast_slice(&rects), 0, wgpu::BufferUsages::STORAGE);
         let rect_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &self.blit_rect_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: rect_buf.as_entire_binding() }] });
         trace(|| format!("renderer: frame {} draws ({} without a pipeline), {} copies, {} targets, {} pipelines", prepared.len(), failed_draws, rects.len(), sizes.len(), self.pipelines.len()));
@@ -2292,6 +2332,20 @@ impl Renderer {
 }
 
 /// ShaderDeviceInfo_t vsync flag (bit 4)
+/// the fields `PipelineId` is built from (minus mv / samples, compared separately)
+fn same_pipeline(a: &DrawCmd, b: &DrawCmd) -> bool {
+    let shader = |x: &crate::api::ShaderRef, y: &crate::api::ShaderRef| Arc::ptr_eq(&x.name, &y.name) && x.static_index == y.static_index && x.dynamic == y.dynamic;
+    shader(&a.vs, &b.vs)
+        && shader(&a.ps, &b.ps)
+        && a.format == b.format
+        && a.stride == b.stride
+        && a.ps_opts == b.ps_opts
+        && a.key == b.key
+        && a.color.map(|c| (c.2, c.3)) == b.color.map(|c| (c.2, c.3))
+        && a.clip == b.clip
+        && a.flex.is_some() == b.flex.is_some()
+}
+
 fn present_mode() -> wgpu::PresentMode {
     let vsync = crate::device::WINDOW.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|w| w.info.flags & 0x10 != 0);
     if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync }

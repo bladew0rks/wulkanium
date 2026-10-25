@@ -264,7 +264,7 @@ pub struct Stencil {
 }
 
 /// d3dlight9 fields from SetLight
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     /// 0 spot, 1 point, 2 directional
     pub kind: i32,
@@ -277,7 +277,7 @@ pub struct Light {
     pub phi: f32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fog {
     pub start: f32,
     pub end: f32,
@@ -304,7 +304,6 @@ pub struct State {
     pub render_depth: i32,
     /// dx9 defaults: 16, 0.00008
     pub shadow_bias: [f32; 2],
-    pub textures: HashMap<i32, Texture>,
     next_texture: i32,
     modify_texture: i32,
     pub bound_textures: [i32; 16],
@@ -347,11 +346,17 @@ pub struct State {
     pub clip_enabled: u32,
     pub clip_transform: Option<[f32; 16]>,
     pub clip_transform_override: bool,
-    pub anisotropy: i32,
     pub vs_dirty: bool,
     pub ps_dirty: bool,
     last_extra: [[f32; 4]; 11],
     last_mip_bias: f32,
+    /// inputs of the last standard vs constants / vs block tail; same inputs = nothing to redo
+    vs_std_key: Option<Box<VsStdKey>>,
+    extra_key: Option<Box<(ExtraKey, [[f32; 4]; 11])>>,
+    /// (format, color element offset) of the last color mesh
+    color_elem: (u64, Option<u32>),
+    /// (tonemap scale bits, hdr type) -> c30
+    tonemap_cache: ([u32; 3], i32, [f32; 4]),
     /// snapshots by id (they never change)
     snap_cache: Vec<Option<std::sync::Arc<shadow::ShadowState>>>,
     /// cameras (view, view x proj) of this frame's / last frame's scene draws
@@ -373,17 +378,41 @@ pub struct State {
 
 const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
 
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+/// the api state. like dx9's, it's guarded by the shader mutex alone: the engine either calls
+/// from one thread or enables that mutex, and the render thread never touches it.
+struct StateCell(std::cell::UnsafeCell<Option<State>>);
+// SAFETY: access only happens inside `with`, under the shader mutex (see above)
+unsafe impl Sync for StateCell {}
+static STATE: StateCell = StateCell(std::cell::UnsafeCell::new(None));
 
-pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    let _shader = crate::lock::guard();
-    with_state(f)
+/// textures live outside the state: the render thread reads them while the game records
+static TEXTURES: parking_lot::Mutex<Option<HashMap<i32, Texture>>> = parking_lot::Mutex::new(None);
+
+pub fn texture_table() -> parking_lot::MappedMutexGuard<'static, HashMap<i32, Texture>> {
+    parking_lot::MutexGuard::map(TEXTURES.lock(), |t| t.get_or_insert_with(HashMap::new))
 }
 
-/// state access without the shader mutex, for the render thread: the game thread can hold the
-/// mutex while it waits for that thread
-pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
+/// mat_forceaniso, read by the render thread
+pub static ANISOTROPY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(1);
+
+/// api calls since the last periodic log line (profiling only)
+static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// ns the game thread waited for the render thread in present
+pub static PRESENT_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    if profiling() {
+        CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let _shader = crate::lock::guard();
+    // tests call from parallel threads without the engine's guarantee
+    #[cfg(test)]
+    let _test = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    #[cfg(debug_assertions)]
+    let _busy = Busy::enter();
+    // SAFETY: serialized by the shader mutex (or the engine's single-threaded mode); `with` is
+    // never re-entered (checked in debug builds)
+    let g = unsafe { &mut *STATE.0.get() };
     let s = g.get_or_insert_with(|| State {
         material: 0,
         snapshot: -1,
@@ -398,7 +427,6 @@ pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
         render_target: -1,
         render_depth: -1,
         shadow_bias: [16.0, 0.00008],
-        textures: HashMap::new(),
         next_texture: 1,
         modify_texture: 0,
         bound_textures: [0; 16],
@@ -433,12 +461,15 @@ pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
         clip_enabled: 0,
         clip_transform: None,
         clip_transform_override: false,
-        anisotropy: 1,
         vs_dirty: true,
         ps_dirty: true,
         last_extra: [[0.0; 4]; 11],
         last_mip_bias: 0.0,
         snap_cache: Vec::new(),
+        vs_std_key: None,
+        extra_key: None,
+        color_elem: (u64::MAX, None),
+        tonemap_cache: ([0; 3], -1, [0.0; 4]),
         vp_cur: Default::default(),
         vp_prev: Default::default(),
         reproj_cache: None,
@@ -454,6 +485,27 @@ pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(s)
 }
 
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// debug builds: catches nested or overlapping `with` (which would alias the state)
+#[cfg(debug_assertions)]
+struct Busy;
+#[cfg(debug_assertions)]
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(debug_assertions)]
+impl Busy {
+    fn enter() -> Busy {
+        assert!(!BUSY.swap(true, std::sync::atomic::Ordering::Acquire), "api state entered twice");
+        Busy
+    }
+}
+#[cfg(debug_assertions)]
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 fn leak(m: Box<Mesh>) -> usize {
     Box::leak(m) as *mut Mesh as usize
@@ -707,7 +759,12 @@ fn standard_ps_constants(s: &mut State, snap: &shadow::ShadowState) {
         2 => col.map(gamma_to_linear),
         _ => [0.0; 3],
     };
-    let tonemap = tonemap_constant();
+    let bits = TONEMAP.each_ref().map(|a| a.load(std::sync::atomic::Ordering::Relaxed));
+    let hdr = crate::hwconfig::hdr_type();
+    if s.tonemap_cache.0 != bits || s.tonemap_cache.1 != hdr {
+        s.tonemap_cache = (bits, hdr, tonemap_constant());
+    }
+    let tonemap = s.tonemap_cache.2;
     // integer hdr tonemaps in the shaders, so fog gets scaled too
     if crate::hwconfig::hdr_type() == crate::hwconfig::HDR_INTEGER && !snap.disable_fog_gamma {
         rgb = rgb.map(|v| v * tonemap[0]);
@@ -834,6 +891,60 @@ fn reprojection(s: &mut State) -> [f32; 16] {
 
 /// vs block tail: half-pixel offset, user clip planes in clip space (disabled = zero, never clips),
 /// reprojection
+/// what `standard_vs_constants` reads
+#[derive(PartialEq)]
+struct VsStdKey {
+    model: [f32; 16],
+    view: [f32; 16],
+    proj: [f32; 16],
+    fog: Fog,
+    overbright: f32,
+    lights: [Option<Light>; 4],
+    flex: bool,
+    skinned: bool,
+    bones: u64,
+}
+
+/// what `vs_extra` reads
+#[derive(PartialEq)]
+struct ExtraKey {
+    viewport: [i32; 4],
+    depth: [f32; 2],
+    frames: u64,
+    jitter: Option<[f32; 2]>,
+    render_target: i32,
+    view: [f32; 16],
+    proj: [f32; 16],
+    clip_enabled: u32,
+    clip_planes: [[f32; 4]; 6],
+    clip_transform: Option<[f32; 16]>,
+    clip_override: bool,
+}
+
+fn cached_vs_extra(s: &mut State) -> [[f32; 4]; 11] {
+    let key = ExtraKey {
+        viewport: s.viewport,
+        depth: s.viewport_depth,
+        frames: s.frames,
+        jitter: crate::dlss::jitter(s.frames),
+        render_target: s.render_target,
+        view: *s.matrices[0].last().unwrap(),
+        proj: *s.matrices[1].last().unwrap(),
+        clip_enabled: s.clip_enabled,
+        clip_planes: s.clip_planes,
+        clip_transform: s.clip_transform,
+        clip_override: s.clip_transform_override,
+    };
+    if let Some(c) = s.extra_key.as_deref() {
+        if c.0 == key {
+            return c.1;
+        }
+    }
+    let out = vs_extra(s);
+    s.extra_key = Some(Box::new((key, out)));
+    out
+}
+
 fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
     let mut out = [[0.0f32; 4]; 11];
     let (mut w, mut h) = (s.viewport[2], s.viewport[3]);
@@ -906,7 +1017,8 @@ fn push_cmd(s: &mut State, c: Cmd) {
 fn push_draw(s: &mut State, c: Cmd) {
     if s.frames == s.trace_from {
         if let Cmd::Draw(d) = &c {
-            let tex: Vec<String> = d.textures.iter().enumerate().filter(|t| *t.1 != 0).map(|(i, h)| format!("s{i}={h}:{}", s.textures.get(h).map_or("?", |t| t.name.as_str()))).collect();
+            let table = texture_table();
+            let tex: Vec<String> = d.textures.iter().enumerate().filter(|t| *t.1 != 0).map(|(i, h)| format!("s{i}={h}:{}", table.get(h).map_or("?", |t| t.name.as_str()))).collect();
             log::line(&format!(
                 "  draw '{}' vs {}/{}+{} ps {}/{}+{} {:?} first {} count {} format {:#x} stride {} vp {:?} depth {:?} vsblk {} psblk {} ps {:?} key {:?} color {:?} [{}]",
                 material_name(s.material), d.vs.name, d.vs.static_index, d.vs.dynamic, d.ps.name, d.ps.static_index, d.ps.dynamic,
@@ -1019,11 +1131,25 @@ fn record_draw_inner(s: &mut State) {
         Some(at)
     });
     lap.lap(2);
-    standard_vs_constants(s, skinned, flex.is_some());
+    let key = VsStdKey {
+        model: *s.matrices[10].last().unwrap(),
+        view: *s.matrices[0].last().unwrap(),
+        proj: *s.matrices[1].last().unwrap(),
+        fog: s.fog,
+        overbright: s.overbright,
+        lights: s.lights,
+        flex: flex.is_some(),
+        skinned,
+        bones: if skinned { s.bones_version } else { 0 },
+    };
+    if s.vs_std_key.as_deref() != Some(&key) {
+        standard_vs_constants(s, skinned, flex.is_some());
+        s.vs_std_key = Some(Box::new(key));
+    }
     lap.lap(3);
     standard_ps_constants(s, &snap);
     lap.lap(4);
-    let extra = vs_extra(s);
+    let extra = cached_vs_extra(s);
     if extra != s.last_extra {
         s.last_extra = extra;
         s.vs_dirty = true;
@@ -1106,13 +1232,16 @@ fn record_draw_inner(s: &mut State) {
     let color = md.color_mesh.and_then(|(cm, first)| {
         let cm = unsafe { &*cm };
         let (fmt, cstride, id) = { let d = cm.r(); (d.format, d.stride, d.id) };
-        let e = vertex_elements(fmt).into_iter().find(|e| e.usage == 10)?;
+        if s.color_elem.0 != fmt {
+            s.color_elem = (fmt, vertex_elements(fmt).into_iter().find(|e| e.usage == 10).map(|e| e.offset as u32));
+        }
+        let e_offset = s.color_elem.1?;
         if s.frames == s.trace_from {
             // capture: mean bgra of the color mesh this draw uses
             let d = cm.r();
             let (mut sum, mut n) = ([0u64; 4], 0u64);
             for v in d.vertices.chunks_exact(cstride.max(1)).skip(first).take(4096) {
-                if let Some(c) = v.get(e.offset as usize..e.offset as usize + 4) {
+                if let Some(c) = v.get(e_offset as usize..e_offset as usize + 4) {
                     for i in 0..4 {
                         sum[i] += c[i] as u64;
                     }
@@ -1122,7 +1251,7 @@ fn record_draw_inner(s: &mut State) {
             log::line(&format!("    color mesh {id}: {} verts total, first {first}, stride {cstride}, mean bytes {:?} over {n}", d.vertex_count, sum.map(|x| if n > 0 { x / n } else { 0 })));
         }
         ensure_uploaded(s, cm);
-        Some((id, (first * cstride) as u64, cstride as u32, e.offset))
+        Some((id, (first * cstride) as u64, cstride as u32, e_offset))
     });
     let border = s.border_clamp;
     lap.lap(7);
@@ -1262,11 +1391,12 @@ fn debug_material(s: &State, snap: &shadow::ShadowState, format: VertexFormat, c
     if !seen.insert((s.material, bound)) || material_name(s.material).starts_with("engine/preload") {
         return;
     }
+    let table = texture_table();
     let bound: Vec<String> = (0..16)
         .filter(|i| snap.textures_enabled & (1 << i) != 0)
         .map(|i| {
             let h = s.bound_textures[i];
-            format!("s{i}={h}:{}{}", s.textures.get(&h).map_or("?", |t| t.name.as_str()), if s.textures.get(&h).is_some_and(|t| t.version == 0) { "(empty)" } else { "" })
+            format!("s{i}={h}:{}{}", table.get(&h).map_or("?", |t| t.name.as_str()), if table.get(&h).is_some_and(|t| t.version == 0) { "(empty)" } else { "" })
         })
         .collect();
     log::line(&format!(
@@ -1422,6 +1552,12 @@ pub fn present() {
         if profiling() {
             log::line(&format!("record ns/draw: {}", take_profile()));
         }
+        // averages since the last line (600 frames, or 1 for the first ones)
+        let span = if frame_no <= 5 { 1 } else { 600 };
+        let calls = CALLS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        let wait = PRESENT_WAIT_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        let render = crate::render::RENDER_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        log::line(&format!("per frame: render thread {:.3} ms, game waited {:.3} ms{}", render as f64 / 1e6, wait as f64 / 1e6, if profiling() { format!(", {calls} api calls") } else { String::new() }));
     }
     crate::render::present(frame);
 }
@@ -1483,7 +1619,7 @@ unsafe extern "C" fn create_texture(_t: *mut c_void, w: i32, h: i32, depth: i32,
     with(|s| {
         let id = s.next_texture;
         s.next_texture += 1;
-        s.textures.insert(id, Texture { width: w, height: h, depth, format: fmt, mips, copies, flags, name, filter: [1, 1], ..Default::default() });
+        texture_table().insert(id, Texture { width: w, height: h, depth, format: fmt, mips, copies, flags, name, filter: [1, 1], ..Default::default() });
         id
     })
 }
@@ -1498,17 +1634,15 @@ unsafe extern "C" fn create_depth_texture(_t: *mut c_void, fmt: i32, w: i32, h: 
     with(|s| {
         let id = s.next_texture;
         s.next_texture += 1;
-        s.textures.insert(id, Texture { width: w, height: h, depth: 1, format: fmt, mips: 1, copies: 1, depth_target: true, ..Default::default() });
+        texture_table().insert(id, Texture { width: w, height: h, depth: 1, format: fmt, mips: 1, copies: 1, depth_target: true, ..Default::default() });
         id
     })
 }
 unsafe extern "C" fn delete_texture(_t: *mut c_void, id: i32) {
-    with(|s| {
-        s.textures.remove(&id);
-    });
+    texture_table().remove(&id);
 }
 unsafe extern "C" fn is_texture(_t: *mut c_void, id: i32) -> bool {
-    with(|s| s.textures.contains_key(&id))
+    texture_table().contains_key(&id)
 }
 unsafe extern "C" fn modify_texture(_t: *mut c_void, id: i32) {
     with(|s| s.modify_texture = id);
@@ -1520,9 +1654,10 @@ unsafe extern "C" fn tex_image_2d(_t: *mut c_void, level: i32, face: i32, _dst_f
     }
     let bytes = image_bytes(src_fmt, w, h);
     let img = texconv::convert(src_fmt, w as u32, h as u32, unsafe { std::slice::from_raw_parts(data, bytes) });
-    with(|s| {
-        let id = s.modify_texture;
-        let Some(t) = s.textures.get_mut(&id) else { return };
+    let id = with(|s| s.modify_texture);
+    {
+        let mut table = texture_table();
+        let Some(t) = table.get_mut(&id) else { return };
         let Some(img) = img else { return };
         if t.depth > 1 {
             // one mip 0 slice per call
@@ -1537,7 +1672,7 @@ unsafe extern "C" fn tex_image_2d(_t: *mut c_void, level: i32, face: i32, _dst_f
         } else if z == 0 {
             t.set_level(face, level, img);
         }
-    });
+    }
 }
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn tex_sub_image_2d(_t: *mut c_void, level: i32, face: i32, x: i32, y: i32, z: i32, w: i32, h: i32, src_fmt: i32, stride: i32, _tiled: bool, data: *const u8) {
@@ -1547,9 +1682,10 @@ unsafe extern "C" fn tex_sub_image_2d(_t: *mut c_void, level: i32, face: i32, x:
     let bpp = texconv::bytes_per_pixel(src_fmt);
     let row = if stride > 0 { stride as usize } else { w as usize * bpp };
     let src = unsafe { std::slice::from_raw_parts(data, row * (h as usize - 1) + w as usize * bpp) };
-    with(|s| {
-        let id = s.modify_texture;
-        let Some(t) = s.textures.get_mut(&id) else { return };
+    let id = with(|s| s.modify_texture);
+    {
+        let mut table = texture_table();
+        let Some(t) = table.get_mut(&id) else { return };
         let (tw, th, fmt) = (t.width, t.height, t.format);
         let Some(levels) = t.face_mut(face) else { return };
         let l = level.max(0) as usize;
@@ -1569,7 +1705,7 @@ unsafe extern "C" fn tex_sub_image_2d(_t: *mut c_void, level: i32, face: i32, x:
                 t.touch(face, l, [x as u32, y as u32, w as u32, h as u32]);
             }
         }
-    });
+    }
 }
 
 /// staging memory: rgba8888, or rgba16161616f for 16-bit textures
@@ -1589,16 +1725,18 @@ unsafe extern "C" fn tex_lock(_t: *mut c_void, level: i32, face: i32, x: i32, y:
         return false;
     }
     let id = with(|s| s.modify_texture);
-    if !with(|s| s.textures.contains_key(&id)) {
+    if !texture_table().contains_key(&id) {
         return false;
     }
     // 16-bit textures (hdr lightmaps) get a half float writer, so lightmaps keep their precision
-    let wide = with(|s| s.textures.get(&id).is_some_and(|t| texconv::is_wide(t.format)));
+    let wide = texture_table().get(&id).is_some_and(|t| texconv::is_wide(t.format));
     let bpp: usize = if wide { 8 } else { 4 };
     // like a d3d lock, starts with the current texels
     let mut data = vec![0u8; w as usize * h as usize * bpp];
-    with(|s| {
-        let Some(Some(img)) = s.textures.get(&id).and_then(|t| t.levels.get(level.max(0) as usize)) else { return };
+    // copy the current texels in (skipped when there are none)
+    (|| {
+        let table = texture_table();
+        let Some(Some(img)) = table.get(&id).and_then(|t| t.levels.get(level.max(0) as usize)) else { return };
         let (Image::Rgba8 { width, height, data: src } | Image::Rgba16f { width, height, data: src }) = img else { return };
         if img.pixel_bytes() != bpp {
             return;
@@ -1613,7 +1751,7 @@ unsafe extern "C" fn tex_lock(_t: *mut c_void, level: i32, face: i32, x: i32, y:
             let d = row * w as usize * bpp;
             data[d..d + n].copy_from_slice(&src[so..so + n]);
         }
-    });
+    })();
     let p = data.as_mut_ptr();
     unsafe {
         // CPixelWriter layout: base, bits, bytes per row, size, flags, rgba shifts, rgba masks
@@ -1634,8 +1772,9 @@ unsafe extern "C" fn tex_lock(_t: *mut c_void, level: i32, face: i32, x: i32, y:
 }
 unsafe extern "C" fn tex_unlock(_t: *mut c_void) {
     let Some(l) = LOCKED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-    with(|s| {
-        let Some(t) = s.textures.get_mut(&l.id) else { return };
+    {
+        let mut table = texture_table();
+        let Some(t) = table.get_mut(&l.id) else { return };
         let lv = l.level.max(0) as usize;
         if t.levels.len() <= lv {
             t.levels.resize(lv + 1, None);
@@ -1656,7 +1795,7 @@ unsafe extern "C" fn tex_unlock(_t: *mut c_void) {
                 t.touch(0, lv, [x as u32, y as u32, w as u32, h as u32]);
             }
         }
-    });
+    }
 }
 
 // gmod x64 IVTFTexture slots, checked against CVTFTexture's vtable
@@ -1672,7 +1811,8 @@ unsafe extern "C" fn tex_image_from_vtf(_t: *mut c_void, vtf: usize, frame: i32)
         return;
     }
     let (w, h, mips, fmt) = unsafe { (vcall::<i32>(vtf, VTF_WIDTH), vcall::<i32>(vtf, VTF_HEIGHT), vcall::<i32>(vtf, VTF_MIP_COUNT), vcall::<i32>(vtf, VTF_FORMAT)) };
-    let (cube, depth) = with(|s| s.textures.get(&s.modify_texture).map_or((false, 1), |t| (t.is_cube(), t.depth)));
+    let id = with(|s| s.modify_texture);
+    let (cube, depth) = texture_table().get(&id).map_or((false, 1), |t| (t.is_cube(), t.depth));
     if depth > 1 {
         // mip 0 holds the slices back to back
         let data: *const u8 = unsafe {
@@ -1685,13 +1825,11 @@ unsafe extern "C" fn tex_image_from_vtf(_t: *mut c_void, vtf: usize, frame: i32)
         }
         let slice = image_bytes(fmt, w, h);
         let slices: Vec<Option<Image>> = (0..depth as usize).map(|z| texconv::convert(fmt, w as u32, h as u32, unsafe { std::slice::from_raw_parts(data.add(z * slice), slice) })).collect();
-        with(|s| {
-            if let Some(t) = s.textures.get_mut(&s.modify_texture) {
-                t.slices = slices;
-                t.version += 1;
-                t.full_dirty = true;
-            }
-        });
+        if let Some(t) = texture_table().get_mut(&id) {
+            t.slices = slices;
+            t.version += 1;
+            t.full_dirty = true;
+        }
         return;
     }
     let faces = if cube { 6 } else { 1 };
@@ -1722,13 +1860,12 @@ unsafe extern "C" fn tex_image_from_vtf(_t: *mut c_void, vtf: usize, frame: i32)
     if out.first().and_then(|l| l.first()).is_none_or(|l| l.is_none()) {
         static FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
-            let (id, name) = with(|s| (s.modify_texture, s.textures.get(&s.modify_texture).map(|t| t.name.clone()).unwrap_or_default()));
+            let name = texture_table().get(&id).map(|t| t.name.clone()).unwrap_or_default();
             log::line(&format!("TexImageFromVTF(texture {id} '{name}', frame {frame}): {w}x{h} fmt {fmt} mips {mips}: no usable mip 0: {why}"));
         }
     }
-    with(|s| {
-        let id = s.modify_texture;
-        if let Some(t) = s.textures.get_mut(&id) {
+    {
+        if let Some(t) = texture_table().get_mut(&id) {
             for (face, levels) in out.into_iter().enumerate() {
                 for (i, img) in levels.into_iter().enumerate() {
                     if let Some(img) = img {
@@ -1737,15 +1874,13 @@ unsafe extern "C" fn tex_image_from_vtf(_t: *mut c_void, vtf: usize, frame: i32)
                 }
             }
         }
-    });
+    }
 }
 fn with_modify_texture(f: impl FnOnce(&mut Texture)) {
-    with(|s| {
-        let id = s.modify_texture;
-        if let Some(t) = s.textures.get_mut(&id) {
-            f(t);
-        }
-    });
+    let id = with(|s| s.modify_texture);
+    if let Some(t) = texture_table().get_mut(&id) {
+        f(t);
+    }
 }
 unsafe extern "C" fn tex_min_filter(_t: *mut c_void, mode: i32) {
     with_modify_texture(|t| t.filter[0] = mode);
@@ -2019,7 +2154,7 @@ unsafe extern "C" fn should_write_depth_to_dest_alpha(_t: *mut c_void) -> bool {
     with(|s| s.fog.mode != 2 && s.int_params[10] != 0)
 }
 unsafe extern "C" fn set_anisotropic_level(_t: *mut c_void, n: i32) {
-    with(|s| s.anisotropy = n.clamp(1, 16));
+    ANISOTROPY.store(n.clamp(1, 16), std::sync::atomic::Ordering::Relaxed);
 }
 /// world space ax + by + cz = d, stored with d negated
 unsafe extern "C" fn set_clip_plane(_t: *mut c_void, i: i32, p: *const f32) {
@@ -2069,7 +2204,7 @@ fn set_target(color: i32, depth: i32) {
     // 0 also means the back buffer
     let color = if color == 0 { -1 } else { color };
     with(|s| {
-        let depth = if depth > 0 && s.textures.get(&depth).is_some_and(|t| is_depth_format(t.format)) { depth } else { -1 };
+        let depth = if depth > 0 && texture_table().get(&depth).is_some_and(|t| is_depth_format(t.format)) { depth } else { -1 };
         if s.render_target != color || s.render_depth != depth {
             s.render_target = color;
             s.render_depth = depth;
@@ -2183,7 +2318,12 @@ fn set_constants(reg: i32, v: *const f32, n: i32, vertex: bool) {
     let src = unsafe { std::slice::from_raw_parts(v, n as usize * 4) };
     with(|s| {
         if vertex {
-            s.vs_high = s.vs_high.max(reg as usize + n as usize - 1);
+            let (lo, hi) = (reg as usize, reg as usize + n as usize);
+            s.vs_high = s.vs_high.max(hi - 1);
+            // registers standard_vs_constants owns: redo it next draw
+            if lo < 17 || (lo < 48 && hi > 27) || hi > 58 {
+                s.vs_std_key = None;
+            }
         }
         let dst = if vertex { &mut s.vs_constants } else { &mut s.ps_constants };
         let mut changed = false;
@@ -2555,6 +2695,9 @@ fn set_bools(reg: i32, v: *const i32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize) };
     with(|s| {
+        if vertex {
+            s.vs_std_key = None;
+        }
         let before = if vertex { s.vs_bools } else { s.ps_bools };
         let bits = if vertex { &mut s.vs_bools } else { &mut s.ps_bools };
         for (i, &b) in src.iter().enumerate() {
@@ -2580,6 +2723,9 @@ fn set_ints(reg: i32, v: *const i32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize * 4) };
     with(|s| {
+        if vertex {
+            s.vs_std_key = None;
+        }
         let dst = if vertex { &mut s.vs_ints } else { &mut s.ps_ints };
         let mut changed = false;
         for (i, c) in src.chunks_exact(4).enumerate() {
@@ -2795,8 +2941,8 @@ unsafe extern "C" fn set_debug_texture_rendering(_t: *mut c_void, on: bool) -> b
 }
 /// bytes of all loaded textures (also used for bound-last-frame), or picmip estimates
 unsafe extern "C" fn texture_memory_used(_t: *mut c_void, kind: i32) -> i32 {
-    let total: u64 = with(|s| {
-        s.textures
+    let total: u64 = {
+        texture_table()
             .values()
             .map(|t| {
                 let base = image_bytes(t.format, t.width, t.height) as u64 * t.depth.max(1) as u64;
@@ -2805,7 +2951,7 @@ unsafe extern "C" fn texture_memory_used(_t: *mut c_void, kind: i32) -> i32 {
                 chain * faces
             })
             .sum()
-    });
+    };
     let v = match kind {
         3 => total / 4,
         4 => total / 16,
