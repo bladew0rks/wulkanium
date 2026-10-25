@@ -56,11 +56,7 @@ shader tests are skipped.
 
 ## License
 
-Copyright 2026 Bladeworks. Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md):
-free for personal, hobby, research and other noncommercial use. **Commercial use of any kind is
-not permitted.**
-
-DLSS builds use NVIDIA's DLSS SDK, which is covered by NVIDIA's own license.
+See [LICENSE](LICENSE.md).
 
 ---
 
