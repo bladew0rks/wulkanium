@@ -35,6 +35,9 @@ Copy `target/<triple>/release/shaderapiwgpu.dll` to `GarrysMod/bin/win64/` and l
 -shaderapi shaderapiwgpu
 ```
 
+DLSS builds also need NVIDIA's `nvngx_dlss.dll` in `GarrysMod/bin/win64/`: the release one from
+the DLSS SDK (`lib/Windows_x86_64/rel`), or a newer version dropped in its place.
+
 ## Keys
 
 | Key | Action |
@@ -42,14 +45,21 @@ Copy `target/<triple>/release/shaderapiwgpu.dll` to `GarrysMod/bin/win64/` and l
 | Insert | Overlay (fps, frame stats) |
 | Home | Log one frame of draws (capture) |
 | Shift+Home | Sampling profiler on/off (results go to the log) |
-| End | DLAA on/off (DLSS builds) |
+| End | DLSS on/off (DLSS builds; mode via `wk_dlss_mode` or Options > wulkanium > DLSS) |
 | Page Up / Page Down | DLSS input view / jitter pattern |
 | Scroll Lock | Shadow map view |
 
-## Benchmarking
+## Screen effects
 
-`addon/` is a small Lua addon (copy it to `garrysmod/addons/wulkanium_bench/`) for comparing
-renderers from the same spot:
+Effects written in WGSL, loaded from `garrysmod/shaders/wulkanium/`, with access to the real
+depth buffer, the camera and motion vectors, and drawn before the HUD. Ambient occlusion and
+sharpening ship in `effects/`. See [EFFECTS.md](EFFECTS.md) for writing your own.
+
+## Addon
+
+`addon/` is a small Lua addon (copy it to `garrysmod/addons/wulkanium/`). It adds the screen
+effects settings page (Options > wulkanium) and benchmark commands for comparing renderers from
+the same spot:
 
 | Command | Action |
 |---|---|

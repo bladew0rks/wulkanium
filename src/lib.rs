@@ -6,6 +6,8 @@ use std::ffi::{CStr, c_char, c_void};
 use std::sync::OnceLock;
 
 pub mod abi;
+pub mod builtin;
+pub mod cvar;
 pub mod api;
 pub mod device;
 pub mod hwconfig;
@@ -15,6 +17,7 @@ pub mod mesh;
 pub mod render;
 pub mod sampler;
 pub mod shader_util;
+pub mod shaderdll;
 pub mod shadow;
 pub mod texconv;
 pub mod texlist;
@@ -25,7 +28,9 @@ pub mod shaders;
 pub mod vpk;
 pub mod overlay;
 pub mod dlss;
+pub mod effects;
 pub mod vtables;
+pub mod vtf76;
 
 #[repr(C)]
 pub struct Interface {
@@ -68,6 +73,8 @@ fn interfaces() -> &'static [(&'static str, Interface)] {
             ("ShaderShadow010", shadow::interface()),
             ("MaterialSystemHardwareConfig012", hwconfig::interface()),
             ("DebugTextureInfo001", api::debug_texture_info_interface()),
+            // materialsystem loads this dll again as a shader dll (see hwconfig)
+            ("ShaderDLL004", shaderdll::dll_interface()),
         ]
     })
 }
@@ -87,6 +94,8 @@ pub unsafe extern "C" fn CreateInterface(name: *const c_char, return_code: *mut 
         // a panic in an extern "C" fn aborts the game, so log it first
         std::panic::set_hook(Box::new(|info| log::line(&format!("PANIC: {info}"))));
         log::line(&format!("--- shaderapiwgpu {} loaded (build {}) ---", env!("CARGO_PKG_VERSION"), env!("BUILD_UNIX_TIME")));
+        // materialsystem (which loads us) reads vtf 7.5 at most
+        vtf76::install();
     });
     let name = if name.is_null() { "" } else { unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("") };
     let found = find_interface(name);

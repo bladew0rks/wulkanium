@@ -5,7 +5,7 @@ pub enum Image {
     Rgba8 { width: u32, height: u32, data: Vec<u8> },
     /// unclamped
     Rgba16f { width: u32, height: u32, data: Vec<u8> },
-    /// 1 = bc1 (dxt1), 2 = bc2 (dxt3), 3 = bc3 (dxt5)
+    /// 1 = bc1 (dxt1), 2 = bc2 (dxt3), 3 = bc3 (dxt5), 7 = bc7
     Bc { kind: u8, width: u32, height: u32, data: Vec<u8> },
 }
 
@@ -186,6 +186,8 @@ pub fn convert(fmt: i32, width: u32, height: u32, data: &[u8]) -> Option<Image> 
     let bc = match fmt {
         DXT1 | DXT1_ONEBITALPHA => Some((1u8, 8usize)),
         DXT3 => Some((2, 16)),
+        // vtf 7.6 BC7 arrives labelled DXT5 (see vtf76)
+        DXT5 if crate::vtf76::bc7_upload(&data[..(w.div_ceil(4).max(1) * h.div_ceil(4).max(1) * 16).min(data.len())]) => Some((7, 16)),
         DXT5 => Some((3, 16)),
         _ => None,
     };

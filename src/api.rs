@@ -225,6 +225,8 @@ pub fn take_destroyed() -> Vec<u64> {
 pub struct Frame {
     /// None = dlss off this frame
     pub jitter: Option<[f32; 2]>,
+    /// (view, proj) of the main 3d view (see `note_camera`)
+    pub camera: Option<([f32; 16], [f32; 16])>,
     pub record_ms: f32,
     pub capture: bool,
     /// frame hit its budget
@@ -376,9 +378,12 @@ pub struct State {
     /// highest vs register the engine wrote directly (sizes every block)
     vs_high: usize,
     last_ps_block: Option<u32>,
+    /// (view, proj, scene draws) since the back buffer's depth was last cleared
+    cameras: Vec<([f32; 16], [f32; 16], u32)>,
+    camera_best: u32,
 }
 
-const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+pub(crate) const IDENTITY: [f32; 16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
 
 /// the api state. like dx9's, it's guarded by the shader mutex alone: the engine either calls
 /// from one thread or enables that mutex, and the render thread never touches it.
@@ -483,6 +488,8 @@ pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
         last_vs_regs: 0,
         vs_high: 0,
         last_ps_block: None,
+        cameras: Vec::new(),
+        camera_best: 0,
     });
     f(s)
 }
@@ -638,7 +645,7 @@ unsafe extern "C" fn render_pass(_t: *mut c_void, _pass: i32, _count: i32) {
 }
 
 /// d3dx row-major
-fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+pub(crate) fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut o = [0.0; 16];
     for r in 0..4 {
         for c in 0..4 {
@@ -827,7 +834,7 @@ fn pixel_fog_params(s: &State) -> [f32; 4] {
 }
 
 /// row-major, None when singular
-fn mat_inverse(m: &[f32; 16]) -> Option<[f32; 16]> {
+pub(crate) fn mat_inverse(m: &[f32; 16]) -> Option<[f32; 16]> {
     mat_inverse_f64(m).map(|v| v.map(|x| x as f32))
 }
 
@@ -918,6 +925,7 @@ struct ExtraKey {
     depth: [f32; 2],
     frames: u64,
     jitter: Option<[f32; 2]>,
+    scale: [f32; 2],
     render_target: i32,
     view: [f32; 16],
     proj: [f32; 16],
@@ -933,6 +941,7 @@ fn cached_vs_extra(s: &mut State) -> [[f32; 4]; 11] {
         depth: s.viewport_depth,
         frames: s.frames,
         jitter: crate::dlss::jitter(s.frames),
+        scale: crate::dlss::render_scale(),
         render_target: s.render_target,
         view: *s.matrices[0].last().unwrap(),
         proj: *s.matrices[1].last().unwrap(),
@@ -961,7 +970,10 @@ fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
     let scene = is_scene(s);
     let jitter = if scene { crate::dlss::jitter(s.frames) } else { None };
     let [jx, jy] = jitter.unwrap_or([0.0, 0.0]);
-    out[0] = [1.0 / w as f32, 1.0 / h as f32, 2.0 * jx / w as f32, -2.0 * jy / h as f32];
+    // under dlss upscaling the scene is drawn into a smaller viewport: offsets are in its pixels
+    let [sx, sy] = if jitter.is_some() { crate::dlss::render_scale() } else { [1.0, 1.0] };
+    let (w, h) = (w as f32 * sx, h as f32 * sy);
+    out[0] = [1.0 / w, 1.0 / h, 2.0 * jx / w, -2.0 * jy / h];
     let m = if jitter.is_some() && s.viewport_depth[1] > 0.15 { reprojection(s) } else { IDENTITY };
     for k in 0..4 {
         out[7 + k] = column(&m, k);
@@ -1186,7 +1198,8 @@ fn record_draw_inner(s: &mut State) {
     };
     s.vs_dirty = false;
     // -1 for the scene under dlss (guide 3.5)
-    let mip_bias: f32 = if is_scene(s) && crate::dlss::jitter(s.frames).is_some() { -1.0 } else { 0.0 };
+    // guide 3.5: log2(render / display) - 1 for the scene under dlss
+    let mip_bias: f32 = if is_scene(s) && crate::dlss::jitter(s.frames).is_some() { crate::dlss::mip_bias() } else { 0.0 };
     if mip_bias != s.last_mip_bias {
         s.last_mip_bias = mip_bias;
         s.ps_dirty = true;
@@ -1251,6 +1264,9 @@ fn record_draw_inner(s: &mut State) {
     let ps = ShaderRef { name: ps_name, static_index: snap.pixel_shader_static, dynamic: s.ps_index };
     let (viewport, depth, format, scissor, clip) = (s.viewport, s.viewport_depth, vsrc.format, s.scissor, s.clip_enabled != 0);
     let scene = is_scene(s);
+    if scene && depth[1] > 0.15 {
+        note_camera(s);
+    }
     // baked vertex lighting, stream 1
     let color = md.color_mesh.and_then(|(cm, first)| {
         let cm = unsafe { &*cm };
@@ -1368,6 +1384,27 @@ fn record_draw_inner(s: &mut State) {
     push_draw(s, c);
 }
 
+/// counts scene draws per camera. the main camera is the one most draws used since the screen's
+/// depth was last cleared (the world, not a late sprite or lua view with its own matrices). it's
+/// settled as the scene draws come in, so clears after the scene (the hud) don't undo it.
+fn note_camera(s: &mut State) {
+    let (view, proj) = (*s.matrices[0].last().unwrap(), *s.matrices[1].last().unwrap());
+    let n = match s.cameras.iter_mut().find(|c| c.0 == view && c.1 == proj) {
+        Some(c) => {
+            c.2 += 1;
+            c.2
+        }
+        None => {
+            s.cameras.push((view, proj, 1));
+            1
+        }
+    };
+    if n > s.camera_best {
+        s.camera_best = n;
+        s.frame.camera = Some((view, proj));
+    }
+}
+
 /// once per material and reason
 fn why_skipped(s: &State, why: &str) {
     static SEEN: Mutex<Option<std::collections::HashSet<(usize, String)>>> = Mutex::new(None);
@@ -1382,8 +1419,15 @@ fn ensure_uploaded(s: &mut State, mesh: &Mesh) {
     let generation = RENDERER_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
     let m = mesh.r();
     if m.uploaded == (m.version, generation) {
-        return;
+        // filled through a kept pointer: no version bump tells us, so refresh every 60 frames
+        // for the first 10 seconds
+        let recent = m.unlocked_at.is_some_and(|t| t.elapsed().as_secs() < 10);
+        if !recent || s.frames.saturating_sub(m.refreshed) < 60 {
+            return;
+        }
     }
+    mesh.d().refreshed = s.frames;
+    let m = mesh.r();
     let vertices = m.vertices[..(m.vertex_count * m.stride).min(m.vertices.len())].to_vec();
     let last = m.vertex_count.saturating_sub(1) as u32;
     let indices: Vec<u32> = m.indices[..m.index_count.min(m.indices.len())].iter().map(|&i| (i as u32).min(last)).collect();
@@ -1548,6 +1592,8 @@ pub fn present() {
             log::line("--- end of frame capture ---");
         }
         s.frames += 1;
+        crate::effects::poll_settings();
+        crate::dlss::poll_mode();
         if crate::texlist::begin_export(s.frames) {
             crate::texlist::export(s.frames, &texture_table(), crate::device::back_buffer_size());
         }
@@ -1558,6 +1604,8 @@ pub fn present() {
         let n = s.draws.len();
         s.draws.clear();
         let mut frame = std::mem::take(&mut s.frame);
+        s.cameras.clear();
+        s.camera_best = 0;
         // start the next frame at this one's sizes, so its buffers don't regrow
         s.frame.vertices.reserve(frame.vertices.len());
         s.frame.indices.reserve(frame.indices.len());
@@ -1724,6 +1772,16 @@ unsafe extern "C" fn tex_image_2d(_t: *mut c_void, level: i32, face: i32, _dst_f
             }
         } else if z == 0 {
             t.set_level(face, level, img);
+        }
+        // diagnosing repeated full uploads: big top mips per texture
+        if level == 0 && w * h >= 1024 * 1024 {
+            static UPLOADS: Mutex<Option<HashMap<i32, u32>>> = Mutex::new(None);
+            let mut u = UPLOADS.lock().unwrap_or_else(|e| e.into_inner());
+            let n = u.get_or_insert_with(HashMap::new).entry(id).or_default();
+            *n += 1;
+            if *n <= 2 || n.is_power_of_two() {
+                log::line(&format!("upload #{n} of '{}' ({id}) {w}x{h} fmt {src_fmt} face {face}", t.name));
+            }
         }
     }
 }
@@ -1952,6 +2010,10 @@ unsafe extern "C" fn clear_buffers(_t: *mut c_void, color: bool, depth: bool, st
     trace(|| format!("  ClearBuffers(color {color}, depth {depth}, {w}x{h})"));
     with(|s| {
         let c = color.then_some(s.clear_color);
+        if depth && s.render_target == -1 {
+            s.cameras.clear();
+            s.camera_best = 0;
+        }
         push_cmd(s, Cmd::Clear { color: c, depth, stencil: stencil.then_some(0) });
     });
 }
@@ -2611,6 +2673,47 @@ fn ps_ambient_cube(reg: i32, black: bool) {
 }
 unsafe extern "C" fn set_ps_ambient_cube(_t: *mut c_void, reg: i32, black: bool) {
     ps_ambient_cube(reg, black);
+}
+/// for built-in shaders (SurfaceGGX): the lights in the vertex shader layout (color + directional
+/// flag, direction + spot flag, position, spot params, attenuation; five registers each) as pixel
+/// shader constants from `reg`. returns how many.
+pub(crate) fn ps_lights_full(reg: i32) -> usize {
+    let regs = with(|s| {
+        let lights = sorted_lights(s);
+        let mut out = [[0.0f32; 4]; 20];
+        let mut n = 0;
+        for (i, l) in lights.iter().enumerate().take(4) {
+            let spot = l.kind == 0;
+            out[5 * i] = [l.color[0], l.color[1], l.color[2], if l.kind == 2 { 1.0 } else { 0.0 }];
+            out[5 * i + 1] = [l.dir[0], l.dir[1], l.dir[2], if spot { 1.0 } else { 0.0 }];
+            out[5 * i + 2] = [l.pos[0], l.pos[1], l.pos[2], 1.0];
+            out[5 * i + 3] = if spot {
+                let (stop, stop2) = ((l.theta * 0.5).cos(), (l.phi * 0.5).cos());
+                [l.falloff, stop, stop2, if stop > stop2 { 1.0 / (stop - stop2) } else { 0.0 }]
+            } else {
+                [0.0, 1.0, 1.0, 1.0]
+            };
+            out[5 * i + 4] = [l.atten[0], l.atten[1], l.atten[2], 0.0];
+            n = i + 1;
+        }
+        (out, n)
+    });
+    for (i, v) in regs.0.iter().enumerate() {
+        set_ps_reg(reg + i as i32, *v);
+    }
+    regs.1
+}
+pub(crate) fn builtin_ps_ambient_cube(reg: i32) {
+    ps_ambient_cube(reg, false);
+}
+pub(crate) fn builtin_ps_fog_params(reg: i32) {
+    ps_fog_params(reg);
+}
+pub(crate) fn builtin_eye_position() -> [f32; 3] {
+    with(|s| camera_position(s.matrices[0].last().unwrap()))
+}
+pub(crate) fn builtin_set_ps_reg(reg: i32, v: [f32; 4]) {
+    set_ps_reg(reg, v);
 }
 fn set_ps_reg(reg: i32, v: [f32; 4]) {
     with(|s| {

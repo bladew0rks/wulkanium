@@ -2,7 +2,7 @@
 //! shaders)
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::DX_LEVEL;
 
@@ -31,7 +31,6 @@ constant!(clip_planes, i32, 6);
 constant!(dx_level, i32, DX_LEVEL);
 constant!(vertex_texture_dim, i32, 4096);
 constant!(tex_depth, i32, 2048);
-constant!(null_ptr, usize, 0);
 
 unsafe extern "C" fn shader_dll_name(_t: *mut c_void) -> *const u8 {
     c"DEFAULT".as_ptr() as *const u8
@@ -41,7 +40,6 @@ pub const HDR_INTEGER: i32 = 1;
 /// the engine turns this on when a map with hdr lighting loads
 static HDR_ENABLED: AtomicBool = AtomicBool::new(false);
 /// 0 = not found yet
-static HDR_LEVEL_CVAR: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn supports_hdr_mode(_t: *mut c_void, mode: i32) -> bool {
     mode == 0 || mode == HDR_INTEGER
@@ -68,57 +66,15 @@ pub fn hdr_type() -> i32 {
 
 /// defaults to 2 when the cvar can't be read
 fn hdr_level() -> i32 {
-    let mut cv = HDR_LEVEL_CVAR.load(Ordering::Relaxed);
-    if cv == 0 {
-        cv = find_hdr_level_cvar();
-        HDR_LEVEL_CVAR.store(cv, Ordering::Relaxed);
-    }
-    if cv == 0 || cv == usize::MAX {
-        return 2;
-    }
-    // x64 ConVar: name @24, parent @56, string @72, int value @88
-    unsafe {
-        let parent = *((cv + 56) as *const usize);
-        *((parent + 88) as *const i32)
-    }
-}
-
-fn find_hdr_level_cvar() -> usize {
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-        let module = GetModuleHandleA(c"vstdlib.dll".as_ptr() as *const u8);
-        if module.is_null() {
-            return 0;
-        }
-        let Some(create) = GetProcAddress(module, c"CreateInterface".as_ptr() as *const u8) else { return 0 };
-        let create: unsafe extern "C" fn(*const i8, *mut i32) -> usize = std::mem::transmute(create);
-        let icvar = create(c"VEngineCvar007".as_ptr(), std::ptr::null_mut());
-        if icvar == 0 {
-            return 0;
-        }
-        // ICvar::FindVar is slot 16 (checked against CCvar's vtable in vstdlib.dll)
-        let find: unsafe extern "C" fn(usize, *const i8) -> usize = std::mem::transmute(*(*(icvar as *const *const usize)).add(16));
-        let cv = find(icvar, c"mat_hdr_level".as_ptr());
-        if cv == 0 {
-            return 0;
-        }
-        let name_is = |p: usize| {
-            let n = *((p + 24) as *const *const std::ffi::c_char);
-            !n.is_null() && std::ffi::CStr::from_ptr(n).to_bytes() == b"mat_hdr_level"
-        };
-        let parent = *((cv + 56) as *const usize);
-        let ok = name_is(cv) && parent != 0 && name_is(parent) && {
-            let s = *((parent + 72) as *const *const std::ffi::c_char);
-            !s.is_null() && std::ffi::CStr::from_ptr(s).to_str().ok().and_then(|s| s.trim().parse::<f32>().ok()).map(|v| v as i32) == Some(*((parent + 88) as *const i32))
-        };
-        crate::log::line(&format!("mat_hdr_level ConVar at {cv:#x}: {}", if ok { "layout ok" } else { "unexpected layout, assuming 2" }));
-        if ok { cv } else { usize::MAX }
-    }
-    #[cfg(not(windows))]
-    0
+    static CV: parking_lot::Mutex<Option<crate::cvar::Cache>> = parking_lot::Mutex::new(None);
+    CV.lock().get_or_insert_with(Default::default).get("mat_hdr_level").map_or(2, |c| c.int())
 }
 unsafe extern "C" fn ignore(_t: *mut c_void) {}
+/// materialsystem loads this as an extra shader dll: ourselves, for SurfaceGGX (see shaderdll)
+unsafe extern "C" fn hw_shader_dll_name(_t: *mut c_void) -> *const std::ffi::c_char {
+    crate::log::line("GetHWSpecificShaderDLLName -> shaderapiwgpu.dll");
+    c"shaderapiwgpu.dll".as_ptr()
+}
 
 pub fn interface() -> crate::Interface {
     use crate::vtables::hardware_config::{slot as s, stubs};
@@ -199,7 +155,7 @@ pub fn interface() -> crate::Interface {
             (s::SetHDREnabled, f(set_hdr_enabled as *const ())),
             (s::SupportsBorderColor, f(yes as *const ())),
             (s::SupportsFetch4, f(no as *const ())),
-            (s::GetHWSpecificShaderDLLName, f(null_ptr as *const ())),
+            (s::GetHWSpecificShaderDLLName, f(hw_shader_dll_name as *const ())),
         ],
     )
 }

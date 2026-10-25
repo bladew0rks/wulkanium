@@ -40,6 +40,19 @@ pub struct Stats {
     pub targets: usize,
 }
 
+/// short messages shown top left for a few seconds, overlay open or not: (text, is error, since)
+static NOTICES: std::sync::Mutex<Vec<(String, bool, Instant)>> = std::sync::Mutex::new(Vec::new());
+const NOTICE_SECS: f32 = 5.0;
+
+pub fn notify(text: impl Into<String>, error: bool) {
+    let mut n = NOTICES.lock().unwrap_or_else(|e| e.into_inner());
+    n.push((text.into(), error, Instant::now()));
+    let len = n.len();
+    if len > 8 {
+        n.drain(..len - 8);
+    }
+}
+
 pub struct Overlay {
     ctx: egui::Context,
     renderer: egui_wgpu::Renderer,
@@ -80,7 +93,12 @@ impl Overlay {
             self.times.pop_front();
         }
         self.poll_toggle();
-        if !self.visible {
+        let notices: Vec<(String, bool, f32)> = {
+            let mut n = NOTICES.lock().unwrap_or_else(|e| e.into_inner());
+            n.retain(|x| x.2.elapsed().as_secs_f32() < NOTICE_SECS);
+            n.iter().map(|x| (x.0.clone(), x.1, x.2.elapsed().as_secs_f32())).collect()
+        };
+        if !self.visible && notices.is_empty() {
             return;
         }
         let (w, h) = stats.size;
@@ -92,7 +110,23 @@ impl Overlay {
         let times = &self.times;
         let avg = times.iter().sum::<f32>() / times.len().max(1) as f32;
         let worst = times.iter().copied().fold(0.0f32, f32::max);
+        let visible = self.visible;
         let output = self.ctx.run_pass(input, |ctx| {
+            if !notices.is_empty() {
+                egui::Area::new(egui::Id::unique("notices")).anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0)).show(ctx, |ui| {
+                    egui::Frame::new().fill(egui::Color32::from_black_alpha(170)).inner_margin(6.0).corner_radius(3.0).show(ui, |ui| {
+                        for (text, error, age) in &notices {
+                            // fade over the last second
+                            let alpha = ((NOTICE_SECS - age).min(1.0) * 255.0) as u8;
+                            let color = if *error { egui::Color32::from_rgba_unmultiplied(255, 120, 110, alpha) } else { egui::Color32::from_rgba_unmultiplied(140, 230, 140, alpha) };
+                            ui.label(egui::RichText::new(text).monospace().color(color));
+                        }
+                    });
+                });
+            }
+            if !visible {
+                return;
+            }
             egui::Window::new("wgpu").title_bar(false).resizable(false).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0)).show(ctx, |ui| {
                 ui.label(egui::RichText::new(format!("shaderapiwgpu · wgpu 30 · {}", stats.backend)).strong().color(egui::Color32::from_rgb(120, 200, 255)));
                 ui.label(&stats.adapter);

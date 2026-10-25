@@ -449,6 +449,7 @@ struct Renderer {
     /// nvidia pcf
     compare_sampler: wgpu::Sampler,
     overlay: crate::overlay::Overlay,
+    effects: crate::effects::Effects,
     #[cfg_attr(not(feature = "dlss"), allow(dead_code))]
     wgpu_adapter: wgpu::Adapter,
     #[cfg(feature = "dlss")]
@@ -825,6 +826,7 @@ impl Renderer {
             ..Default::default()
         });
         let overlay = crate::overlay::Overlay::new(&device, config.format);
+        let effects = crate::effects::Effects::new(&device, &queue);
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("occlusion"), ty: wgpu::QueryType::Occlusion, count: MAX_QUERIES });
         // vulkan pipeline cache persisted in the game directory
         let pipeline_cache = has_cache.then(|| {
@@ -842,6 +844,7 @@ impl Renderer {
             debug_snapshot: None,
             wgpu_adapter: adapter,
             overlay,
+            effects,
             query_set,
             adapter: info.name.clone(),
             backend: format!("{:?}", info.backend),
@@ -938,6 +941,7 @@ impl Renderer {
                 match kind {
                     1 => wgpu::TextureFormat::Bc1RgbaUnorm,
                     2 => wgpu::TextureFormat::Bc2RgbaUnorm,
+                    7 => wgpu::TextureFormat::Bc7RgbaUnorm,
                     _ => wgpu::TextureFormat::Bc3RgbaUnorm,
                 },
                 Some(if *kind == 1 { 8u32 } else { 16 }),
@@ -1160,7 +1164,8 @@ impl Renderer {
         }
         let elements = vertex_elements(format);
         let present = |usage: u8, index: u8| (color_stream && usage == 10 && index == 1) || (flex && index == 1 && (usage == 0 || usage == 3)) || elements.iter().any(|e| e.usage == usage && e.index == index);
-        let m = match crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_vs(&s, &present, clip, mv)) {
+        let translated = if name.starts_with(crate::builtin::PREFIX) { crate::builtin::translate_vs(name, &present, clip, mv) } else { crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_vs(&s, &present, clip, mv)) };
+        let m = match translated {
             Ok(t) => self.module(name, &t.wgsl).map(|module| Arc::new(VsModule { module, inputs: t.inputs, samplers: t.samplers })),
             Err(e) => {
                 log::line(&format!("renderer: can't translate {name}: {e}"));
@@ -1176,7 +1181,8 @@ impl Renderer {
         if let Some(m) = self.ps_modules.get(&key) {
             return m.clone();
         }
-        let m = match crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_ps(&s, &opts, mv)) {
+        let translated = if name.starts_with(crate::builtin::PREFIX) { crate::builtin::translate_ps(name, &opts, mv) } else { crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_ps(&s, &opts, mv)) };
+        let m = match translated {
             Ok(t) => self.module(name, &t.wgsl).map(|module| Arc::new(PsModule { module, samplers: t.samplers })),
             Err(e) => {
                 log::line(&format!("renderer: can't translate {name}: {e}"));
@@ -1303,7 +1309,9 @@ impl Renderer {
         if let Some(c) = self.code.get(&key) {
             return c.clone();
         }
-        let c = self.shaders.get(&r.name.get(), r.static_index, r.dynamic);
+        let name = r.name.get();
+        // built-in shaders have no bytecode: a unique handle per combo keeps the caches keyed
+        let c = if name.starts_with(crate::builtin::PREFIX) { Some(Arc::new(vec![r.static_index as u32, r.dynamic as u32])) } else { self.shaders.get(&name, r.static_index, r.dynamic) };
         self.code.insert(key, c.clone());
         c
     }
@@ -1578,6 +1586,9 @@ impl Renderer {
         for id in crate::api::take_destroyed() {
             self.meshes.remove(&id);
         }
+        if present {
+            self.effects.poll(&self.device, self.config.format);
+        }
         let mut upload_bytes = 0usize;
         for u in &frame.uploads {
             let vb = self.buffer("mesh vertices", &u.vertices, 0, wgpu::BufferUsages::VERTEX);
@@ -1677,7 +1688,8 @@ impl Renderer {
                         sample_count: samples,
                         dimension: wgpu::TextureDimension::D2,
                         format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        // readable: screen effects resolve the depth
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
                     })
                     .create_view(&Default::default())
@@ -1708,16 +1720,43 @@ impl Renderer {
             ],
         });
 
+        // the scene ends at the last perspective back buffer draw; passes up to there write motion
+        // vectors
+        #[cfg(feature = "dlss")]
+        // dlss needs single-sampled inputs
+        let dlss_frame = present && samples == 1 && frame.jitter.is_some() && self.dlss.as_mut().is_some_and(|d| d.enabled && d.ensure(&self.device, &self.queue, (w, h)));
+        #[cfg(not(feature = "dlss"))]
+        let dlss_frame = false;
+        let scene_end: Option<usize> = if dlss_frame { find_scene_end(&frame.cmds) } else { None };
+        // dlss upscaling: back buffer work up to the scene's end goes into the top-left render-size
+        // part (draws, scissors and copies scaled by this)
+        #[cfg(feature = "dlss")]
+        let up: Option<[f32; 2]> = self
+            .dlss
+            .as_ref()
+            .filter(|_| dlss_frame)
+            .map(|d| [d.render_size().0 as f32 / w as f32, d.render_size().1 as f32 / h as f32])
+            .filter(|s| *s != [1.0, 1.0]);
+        #[cfg(not(feature = "dlss"))]
+        let up: Option<[f32; 2]> = None;
+        let scaled = |draws_before: usize| up.filter(|_| scene_end.is_some_and(|e| draws_before <= e));
+
         let mut rects: Vec<[f32; 4]> = Vec::new();
         let mut target = BACK;
         let mut blit_info: Vec<(i32, i32, [f32; 4], bool)> = Vec::new(); // src, dst, viewport, src is a texture
+        let mut draws_before = 0usize;
         for c in &frame.cmds {
             match c {
+                Cmd::Draw(_) => draws_before += 1,
                 Cmd::Target { color, .. } => target = if *color == BACK { BACK } else if sizes.contains_key(color) { *color } else { DISCARD },
                 Cmd::Copy { dst, src_rect, dst_rect } => {
                     let src_size = self.targets.get(&target).map_or((w, h), |t| t.size);
                     let (sw, sh) = (src_size.0 as f32, src_size.1 as f32);
-                    rects.push(src_rect.map_or([0.0, 0.0, 1.0, 1.0], |r| [r[0] as f32 / sw, r[1] as f32 / sh, (r[0] + r[2]) as f32 / sw, (r[1] + r[3]) as f32 / sh]));
+                    let mut r = src_rect.map_or([0.0, 0.0, 1.0, 1.0], |r| [r[0] as f32 / sw, r[1] as f32 / sh, (r[0] + r[2]) as f32 / sw, (r[1] + r[3]) as f32 / sh]);
+                    if let (BACK, Some([sx, sy])) = (target, scaled(draws_before)) {
+                        r = [r[0] * sx, r[1] * sy, r[2] * sx, r[3] * sy];
+                    }
+                    rects.push(r);
                     let size = sizes.get(dst).copied().unwrap_or((w, h));
                     let vp = dst_rect.map_or([0.0, 0.0, size.0 as f32, size.1 as f32], |r| [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32]);
                     blit_info.push((target, *dst, vp, false));
@@ -1726,25 +1765,18 @@ impl Renderer {
                     let (sw, sh) = src_sizes.get(src).map_or((1.0, 1.0), |s| (s.0 as f32, s.1 as f32));
                     rects.push(src_rect.map_or([0.0, 0.0, 1.0, 1.0], |r| [r[0] as f32 / sw, r[1] as f32 / sh, (r[0] + r[2]) as f32 / sw, (r[1] + r[3]) as f32 / sh]));
                     let size = if target == BACK { (w, h) } else { sizes.get(&target).copied().unwrap_or((w, h)) };
-                    let vp = dst_rect.map_or([0.0, 0.0, size.0 as f32, size.1 as f32], |r| [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32]);
+                    let mut vp = dst_rect.map_or([0.0, 0.0, size.0 as f32, size.1 as f32], |r| [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32]);
+                    if let (BACK, Some([sx, sy])) = (target, scaled(draws_before)) {
+                        vp = [vp[0] * sx, vp[1] * sy, vp[2] * sx, vp[3] * sy];
+                    }
                     blit_info.push((*src, target, vp, true));
                 }
                 _ => {}
             }
         }
 
-        // the scene ends at the last perspective back buffer draw; passes up to there write motion
-        // vectors
-        #[cfg(feature = "dlss")]
-        // dlss needs single-sampled inputs
-        let dlss_frame = present && samples == 1 && frame.jitter.is_some() && self.dlss.as_mut().is_some_and(|d| d.enabled && d.ensure(&self.device, &self.queue, (w, h)));
-        #[cfg(not(feature = "dlss"))]
-        let dlss_frame = false;
-        let scene_end: Option<usize> = if dlss_frame {
-            frame.cmds.iter().filter_map(|c| if let Cmd::Draw(d) = c { Some(d.scene) } else { None }).enumerate().filter(|(_, s)| *s).map(|(i, _)| i).last()
-        } else {
-            None
-        };
+        // screen effects run after the same draw (single-sampled only: they read the depth buffer)
+        let fx_end: Option<usize> = if present && crate::effects::any_enabled() { find_scene_end(&frame.cmds) } else { None };
         rects.push([0.0, 0.0, 1.0, 1.0]);
         let full_rect = rects.len() as u32 - 1;
         #[cfg(not(feature = "dlss"))]
@@ -1817,6 +1849,7 @@ impl Renderer {
             Pass { target: i32, depth_tex: Option<i32>, color: wgpu::LoadOp<wgpu::Color>, depth: wgpu::LoadOp<f32>, stencil: wgpu::LoadOp<u32>, mv: bool, draws: Vec<Item<'a>> },
             Blit { blit: usize },
             Dlss,
+            Effects,
         }
         let mut dlss_pending = scene_end.is_some();
         let mut query_slots: Vec<(u64, u64)> = Vec::new();
@@ -1850,6 +1883,9 @@ impl Renderer {
                     if Some(draw_no) == scene_end {
                         steps.push(Step::Dlss);
                         dlss_pending = false;
+                    }
+                    if Some(draw_no) == fx_end {
+                        steps.push(Step::Effects);
                     }
                     draw_no += 1;
                 }
@@ -1959,6 +1995,19 @@ impl Renderer {
                 }
                 #[cfg(not(feature = "dlss"))]
                 Step::Dlss => {}
+                Step::Effects => {
+                    let back = &self.targets[&BACK];
+                    let (color, color_view) = (back.texture.clone(), back.view.clone());
+                    let depth = depth_by_target[&BACK].texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+                    let inputs = crate::effects::Inputs { color: &color, color_view: &color_view, depth: &depth, motion: mv_view.as_ref(), jitter: frame.jitter.filter(|_| dlss_frame), depth_size: up.map(|[sx, sy]| (((w as f32 * sx).round() as u32).max(1), ((h as f32 * sy).round() as u32).max(1))), camera: frame.camera };
+                    match &self.back_msaa {
+                        Some(m) => {
+                            let (mc, md, n) = (m.color.clone(), m.depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() }), m.samples);
+                            self.effects.run_msaa(&self.device, &self.queue, &mut enc, &inputs, &mc, &md, n);
+                        }
+                        None => self.effects.run(&self.device, &self.queue, &mut enc, &inputs),
+                    }
+                }
                 Step::Pass { target, depth_tex, color, depth, stencil, mv, draws } => {
                     let t = &self.targets[target];
                     let msaa = self.back_msaa.as_ref().filter(|_| *target == BACK);
@@ -2048,16 +2097,26 @@ impl Renderer {
                             pass.set_stencil_reference(d.stencil_ref);
                             cur.stencil_ref = Some(d.stencil_ref);
                         }
-                        let [vx, vy, vw, vh] = d.viewport;
+                        let mut viewport = d.viewport;
+                        let mut scissor = d.scissor;
+                        // the part of the target this draw may cover
+                        let (mut fw, mut fh) = (tw, th);
+                        if let (BACK, Some([sx, sy])) = (*target, scaled(*n)) {
+                            let s = |v: i32, k: f32| (v as f32 * k).round() as i32;
+                            viewport = [s(viewport[0], sx), s(viewport[1], sy), s(viewport[2], sx), s(viewport[3], sy)];
+                            scissor = Some(scissor.map_or([0, 0, s(tw, sx), s(th, sy)], |[l, t, r, b]| [s(l, sx), s(t, sy), s(r, sx), s(b, sy)]));
+                            (fw, fh) = (s(tw, sx), s(th, sy));
+                        }
+                        let [vx, vy, vw, vh] = viewport;
                         let (x0, y0) = (vx.clamp(0, tw), vy.clamp(0, th));
                         let (x1, y1) = ((vx + vw).clamp(0, tw), (vy + vh).clamp(0, th));
-                        let vp = if vw > 0 && vh > 0 && x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, tw, th] };
+                        let vp = if vw > 0 && vh > 0 && x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, fw, fh] };
                         let vp_key = (vp, d.depth[0].to_bits(), d.depth[1].to_bits());
                         if cur.viewport != Some(vp_key) {
                             pass.set_viewport(vp[0] as f32, vp[1] as f32, vp[2] as f32, vp[3] as f32, d.depth[0], d.depth[1]);
                             cur.viewport = Some(vp_key);
                         }
-                        let sc = match d.scissor {
+                        let sc = match scissor {
                             Some([l, t, r, b]) => {
                                 let (l, t) = (l.clamp(0, tw), t.clamp(0, th));
                                 let (r, b) = (r.clamp(l, tw), b.clamp(t, th));
@@ -2235,10 +2294,10 @@ impl Renderer {
                             (false, true) => " · y flipped",
                             (true, true) => " · x+y flipped",
                         };
-                        format!("DLAA {}×{} · {} ({:+.2}, {:+.2}){flips}", d.size().0, d.size().1, crate::dlss::jitter_mode_name(), j[0], j[1])
+                        format!("{} {}×{} → {}×{} · {} ({:+.2}, {:+.2}){flips}", crate::dlss::mode_name(d.mode()), d.render_size().0, d.render_size().1, d.size().0, d.size().1, crate::dlss::jitter_mode_name(), j[0], j[1])
                     }
-                    Some(d) if d.enabled => "DLAA on, waiting for a scene".to_string(),
-                    Some(_) => "DLAA off (End toggles)".to_string(),
+                    Some(d) if d.enabled => format!("{} on, waiting for a scene", crate::dlss::mode_name(crate::dlss::MODE.load(std::sync::atomic::Ordering::Relaxed))),
+                    Some(_) => "off (End toggles)".to_string(),
                     None => "unavailable (see log)".to_string(),
                 };
                 #[cfg(not(feature = "dlss"))]
@@ -2341,6 +2400,15 @@ impl Renderer {
         }
         let _ = self.device.poll(wgpu::PollType::Poll);
     }
+}
+
+/// the draw (index among draws) that ends the 3d scene: the last viewmodel draw (the 3d view
+/// always ends with it; lua passes after it, like halos, redraw models and must not count), else
+/// the last perspective back buffer draw
+fn find_scene_end(cmds: &[Cmd]) -> Option<usize> {
+    let scene = || cmds.iter().filter_map(|c| if let Cmd::Draw(d) = c { Some(d) } else { None }).enumerate().filter(|(_, d)| d.scene);
+    // viewmodels draw with their depth range squeezed to [0, 0.1]
+    scene().filter(|(_, d)| d.depth[1] < 0.15 && d.depth[1] > 0.02).map(|(i, _)| i).last().or_else(|| scene().map(|(i, _)| i).last())
 }
 
 /// ShaderDeviceInfo_t vsync flag (bit 4)

@@ -41,6 +41,16 @@ pub struct MeshData {
     pub version: u64,
     /// (version, renderer generation) last uploaded
     pub uploaded: (u64, u64),
+    /// vertices of the last lock_mesh
+    pub locked_vertices: usize,
+    /// locked and unlocked with nothing written: the engine keeps the pointer and fills it later
+    /// (the static prop color mesh pool), so the contents can change without a lock
+    pub written_outside_lock: bool,
+    /// frame of the last upload
+    pub refreshed: u64,
+    /// when such a mesh was unlocked; it's refreshed for a while after (the engine fills the
+    /// lighting while the map loads)
+    pub unlocked_at: Option<std::time::Instant>,
 }
 
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -216,11 +226,15 @@ unsafe extern "C" fn lock_mesh(this: *mut c_void, nv: i32, ni: i32, desc: *mut M
     let desc = unsafe { &mut *desc };
     m.lock_vertices(0, nv.max(0) as usize, &mut desc.vertex);
     m.lock_indices(0, ni.max(0) as usize, &mut desc.index);
+    m.d().locked_vertices = nv.max(0) as usize;
 }
 unsafe extern "C" fn unlock_mesh(this: *mut c_void, nv: i32, ni: i32, _desc: *mut MeshDesc) {
     let _shader = crate::lock::guard();
     let d = unsafe { Mesh::from_ptr(this) }.d();
-    d.vertex_count = nv.max(0) as usize;
+    // a static buffer keeps the size it was locked with, whatever was written this time
+    d.written_outside_lock = !d.dynamic && nv <= 0 && d.locked_vertices > 0;
+    d.unlocked_at = d.written_outside_lock.then(std::time::Instant::now);
+    d.vertex_count = if d.written_outside_lock { d.locked_vertices } else { nv.max(0) as usize };
     d.index_count = ni.max(0) as usize;
     d.version += 1;
 }

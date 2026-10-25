@@ -1,10 +1,63 @@
-//! dlss (dlaa) through dlss_wgpu, `dlss` feature. scene draws are jittered and write motion
-//! vectors; dlss resolves the back buffer after the last scene draw, before the hud. End toggles.
+//! dlss through dlss_wgpu, `dlss` feature. scene draws are jittered and write motion vectors;
+//! dlss resolves the back buffer after the last scene draw, before the hud. End toggles.
+//! upscaling modes draw the scene into the top-left render-resolution part of the back buffer
+//! (dlss reads it as a sub-rectangle) and dlss writes the full resolution result.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// scene draws get jitter and motion vectors
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// quality mode (`wk_dlss_mode`): 0 dlaa, 1 quality, 2 balanced, 3 performance, 4 ultra performance
+pub static MODE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// render / display size of the dlss currently set up, as f32 bits (1.0 = dlaa)
+static SCALE_X: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+static SCALE_Y: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn mode_name(mode: u32) -> &'static str {
+    match mode {
+        0 => "DLAA",
+        1 => "Quality",
+        2 => "Balanced",
+        3 => "Performance",
+        _ => "Ultra Performance",
+    }
+}
+
+/// added to the scene's mip bias (`wk_dlss_mip_bias`), f32 bits. guide 3.5: the recommended
+/// bias can flicker on high-frequency textures; up to +1 backs off to log2(render / display)
+static MIP_BIAS_OFFSET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// game thread, once a frame: pick up `wk_dlss_mode` and `wk_dlss_mip_bias`
+pub fn poll_mode() {
+    static CVARS: parking_lot::Mutex<Option<crate::cvar::Cache>> = parking_lot::Mutex::new(None);
+    let mut c = CVARS.lock();
+    let c = c.get_or_insert_with(Default::default);
+    if let Some(cv) = c.get("wk_dlss_mode") {
+        MODE.store(cv.int().clamp(0, 4) as u32, Ordering::Relaxed);
+    }
+    if let Some(cv) = c.get("wk_dlss_mip_bias") {
+        MIP_BIAS_OFFSET.store(cv.float().clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// guide 3.5: log2(render / display) - 1, plus the user's offset
+pub fn mip_bias() -> f32 {
+    render_scale()[0].log2() - 1.0 + f32::from_bits(MIP_BIAS_OFFSET.load(Ordering::Relaxed))
+}
+
+/// render / display size while dlss is on (scene draws render at this fraction), else 1
+pub fn render_scale() -> [f32; 2] {
+    if !ACTIVE.load(Ordering::Relaxed) {
+        return [1.0, 1.0];
+    }
+    [f32::from_bits(SCALE_X.load(Ordering::Relaxed)), f32::from_bits(SCALE_Y.load(Ordering::Relaxed))]
+}
+
+pub fn set_render_scale(x: f32, y: f32) {
+    SCALE_X.store(x.to_bits(), Ordering::Relaxed);
+    SCALE_Y.store(y.to_bits(), Ordering::Relaxed);
+}
 /// F7 / F8 flip the jitter signs reported to dlss
 pub static FLIP_X: AtomicBool = AtomicBool::new(false);
 pub static FLIP_Y: AtomicBool = AtomicBool::new(false);
@@ -118,7 +171,10 @@ pub fn poll_jitter_mode_key() {
 pub fn jitter(frame: u64) -> Option<[f32; 2]> {
     ACTIVE.load(Ordering::Relaxed).then(|| match JITTER_MODE.load(Ordering::Relaxed) {
         0 => {
-            let i = (frame % 32) as u32 + 1;
+            // guide 3.7.1: 8 x (display / render)^2 phases, at least 32 (kept from dlaa)
+            let r = 1.0 / f32::from_bits(SCALE_X.load(Ordering::Relaxed)).max(0.1);
+            let phases = ((8.0 * r * r).ceil() as u64).max(32);
+            let i = (frame % phases) as u32 + 1;
             [halton(i, 2) - 0.5, halton(i, 3) - 0.5]
         }
         1 => [0.0, 0.0],
@@ -207,23 +263,34 @@ mod imp {
 
     pub const PROJECT_ID: uuid::Uuid = uuid::uuid!("6d1c0c55-7a0e-4a52-9b0e-2b8f6f2a6c1d");
 
-    /// ngx loads `<game>/dlss/lib/Windows_x86_64/dev/nvngx_dlss.dll` (dlss_wgpu reads `$DLSS_SDK`)
+    /// ngx loads the release nvngx_dlss.dll from the game's exe folder (bin/win64), so a newer one
+    /// can simply be dropped there. otherwise `<game>/dlss/lib/Windows_x86_64/rel/` (dlss_wgpu
+    /// adds `$DLSS_SDK/lib/<platform>/rel` to ngx's search path)
     pub fn prepare_environment() {
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(dll) = exe_dir.map(|d| d.join("nvngx_dlss.dll")).filter(|p| p.exists()) {
+            log::line(&format!("dlss: using {}", dll.display()));
+            return;
+        }
         if let Ok(cwd) = std::env::current_dir() {
             let dir = cwd.join("dlss");
-            if dir.join("lib/Windows_x86_64/dev/nvngx_dlss.dll").exists() {
+            if dir.join("lib/Windows_x86_64/rel/nvngx_dlss.dll").exists() {
+                log::line(&format!("dlss: using {}", dir.join("lib/Windows_x86_64/rel/nvngx_dlss.dll").display()));
                 // SAFETY: runs before other threads read the environment
                 unsafe { std::env::set_var("DLSS_SDK", &dir) };
-            } else {
-                log::line(&format!("dlss: {} has no lib/Windows_x86_64/dev/nvngx_dlss.dll", dir.display()));
+                return;
             }
         }
+        log::line("dlss: no nvngx_dlss.dll in bin/win64 (or dlss/lib/Windows_x86_64/rel); dlss will be unavailable");
     }
 
     pub struct Dlss {
         sdk: Arc<Mutex<DlssSdk>>,
         sr: Option<DlssSuperResolution>,
+        /// display size, render size and mode of `sr`
         size: (u32, u32),
+        render: (u32, u32),
+        mode: u32,
         pub mv: Option<(wgpu::Texture, wgpu::TextureView)>,
         pub output: Option<(wgpu::Texture, wgpu::TextureView)>,
         pub enabled: bool,
@@ -236,7 +303,7 @@ mod imp {
             match DlssSdk::new(PROJECT_ID, device.clone()) {
                 Ok(sdk) => {
                     log::line("dlss: SDK initialized");
-                    Some(Dlss { sdk, sr: None, size: (0, 0), mv: None, output: None, enabled: true, ran: false })
+                    Some(Dlss { sdk, sr: None, size: (0, 0), render: (0, 0), mode: 0, mv: None, output: None, enabled: true, ran: false })
                 }
                 Err(e) => {
                     log::line(&format!("dlss: SDK unavailable: {e:?}"));
@@ -246,19 +313,44 @@ mod imp {
         }
 
         pub fn ensure(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, size: (u32, u32)) -> bool {
-            if self.sr.is_some() && self.size == size {
+            let mode = super::MODE.load(std::sync::atomic::Ordering::Relaxed);
+            if self.sr.is_some() && self.size == size && self.mode == mode {
                 return true;
             }
             self.sr = None;
             let flags = DlssFeatureFlags::LowResolutionMotionVectors | DlssFeatureFlags::AutoExposure;
-            match DlssSuperResolution::new([size.0, size.1], DlssPerfQualityMode::Dlaa, flags, self.sdk.clone(), device, queue) {
-                Ok(sr) => self.sr = Some(sr),
+            let quality = match mode {
+                0 => DlssPerfQualityMode::Dlaa,
+                1 => DlssPerfQualityMode::Quality,
+                2 => DlssPerfQualityMode::Balanced,
+                3 => DlssPerfQualityMode::Performance,
+                _ => DlssPerfQualityMode::UltraPerformance,
+            };
+            match DlssSuperResolution::new([size.0, size.1], quality, flags, self.sdk.clone(), device, queue) {
+                Ok(sr) => {
+                    // dlss_wgpu's render_resolution() is the bottom of the dynamic range; render at
+                    // the mode's own ratio (guide 3.7.1), inside the allowed range
+                    let ratio = match mode {
+                        0 => 1.0,
+                        1 => 1.5,
+                        2 => 1.724,
+                        3 => 2.0,
+                        _ => 3.0,
+                    };
+                    let range = sr.render_resolution_range();
+                    let (lo, hi) = (range.start(), range.end());
+                    let want = |d: u32, i: usize| ((d as f32 / ratio).round() as u32).clamp(lo[i].max(1), hi[i].max(lo[i]).max(1)).min(d);
+                    self.render = (want(size.0, 0), want(size.1, 1));
+                    self.sr = Some(sr);
+                }
                 Err(e) => {
-                    log::line(&format!("dlss: can't create DLAA for {}x{}: {e:?}", size.0, size.1));
+                    log::line(&format!("dlss: can't create {} for {}x{}: {e:?}", super::mode_name(mode), size.0, size.1));
                     self.enabled = false;
                     return false;
                 }
             }
+            self.mode = mode;
+            super::set_render_scale(self.render.0 as f32 / size.0 as f32, self.render.1 as f32 / size.1 as f32);
             let tex = |label, format, usage| {
                 let t = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -277,14 +369,14 @@ mod imp {
             self.output = Some(tex("dlss output", wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING));
             self.size = size;
             self.ran = false;
-            log::line(&format!("dlss: DLAA at {}x{}", size.0, size.1));
+            log::line(&format!("dlss: {} at {}x{} from {}x{}", super::mode_name(mode), size.0, size.1, self.render.0, self.render.1));
             true
         }
 
         /// returns the command buffer to submit after `encoder`'s
         pub fn evaluate(&mut self, encoder: &mut wgpu::CommandEncoder, adapter: &wgpu::Adapter, color: &wgpu::TextureView, depth: &wgpu::TextureView, jitter: [f32; 2]) -> Option<wgpu::CommandBuffer> {
             let (sr, mv, out) = (self.sr.as_mut()?, &self.mv.as_ref()?.1, &self.output.as_ref()?.1);
-            let (w, h) = self.size;
+            let (w, h) = self.render;
             let params = DlssSuperResolutionRenderParameters {
                 color,
                 depth,
@@ -298,8 +390,9 @@ mod imp {
                     if super::FLIP_X.load(std::sync::atomic::Ordering::Relaxed) { -jitter[0] } else { jitter[0] },
                     if super::FLIP_Y.load(std::sync::atomic::Ordering::Relaxed) { -jitter[1] } else { jitter[1] },
                 ],
-                partial_texture_size: None,
-                // motion vectors are in uv units
+                // the scene sits in the top-left render-size part of the full-size textures
+                partial_texture_size: Some([w, h]),
+                // motion vectors are in uv units (of the scene's viewport)
                 motion_vector_scale: Some([w as f32, h as f32]),
             };
             match sr.render(params, encoder, adapter) {
@@ -317,6 +410,14 @@ mod imp {
 
         pub fn size(&self) -> (u32, u32) {
             self.size
+        }
+
+        pub fn render_size(&self) -> (u32, u32) {
+            self.render
+        }
+
+        pub fn mode(&self) -> u32 {
+            self.mode
         }
 
         pub fn skipped(&mut self) {
