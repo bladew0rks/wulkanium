@@ -49,6 +49,11 @@ const MAX_QUERIES: u32 = 4096;
 /// run the recorded part of the frame without presenting (ReadPixels)
 /// ns the render thread spent drawing frames, since the last periodic log line
 pub static RENDER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// parts of RENDER_NS: waiting for a swapchain image, and the present call
+pub static ACQUIRE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static PRESENT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// gpu time of the last measured frame
+pub static GPU_US: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// work for the render thread, in order
 enum Job {
@@ -72,6 +77,7 @@ fn queue() -> Option<std::sync::mpsc::SyncSender<Job>> {
         let thread = std::thread::Builder::new()
             .name("wulkanium render".into())
             .spawn(move || {
+                crate::sampler::note_thread(crate::sampler::Target::Render);
                 for job in rx {
                     match job {
                         Job::Present(frame) => present_now(frame),
@@ -406,7 +412,7 @@ struct Renderer {
     /// background pipeline compiles
     compiler: Compiler,
     /// keyed by the snapshot's shader name pointer
-    code: FxHashMap<(usize, i32, i32), Option<Bytecode>>,
+    code: FxHashMap<(crate::shadow::ShaderName, i32, i32), Option<Bytecode>>,
     /// 0 = unavailable
     gpu_us: Arc<std::sync::atomic::AtomicU32>,
     timestamps: Option<wgpu::QuerySet>,
@@ -1293,18 +1299,18 @@ impl Renderer {
     }
 
     fn bytecode(&mut self, r: &crate::api::ShaderRef) -> Option<Bytecode> {
-        let key = (Arc::as_ptr(&r.name) as *const u8 as usize, r.static_index, r.dynamic);
+        let key = (r.name, r.static_index, r.dynamic);
         if let Some(c) = self.code.get(&key) {
             return c.clone();
         }
-        let c = self.shaders.get(&r.name, r.static_index, r.dynamic);
+        let c = self.shaders.get(&r.name.get(), r.static_index, r.dynamic);
         self.code.insert(key, c.clone());
         c
     }
 
     fn pipeline(&mut self, d: &DrawCmd, mv: bool, samples: u32) -> Option<&Pipeline> {
         let vs_code = self.bytecode(&d.vs)?;
-        let ps_code = if d.ps.name.is_empty() { None } else { Some(self.bytecode(&d.ps)?) };
+        let ps_code = if d.ps.name.is_none() { None } else { Some(self.bytecode(&d.ps)?) };
         let id = PipelineId { vs: Arc::as_ptr(&vs_code) as usize, format: d.format, stride: d.stride, ps: ps_code.as_ref().map_or(0, |c| Arc::as_ptr(c) as usize), ps_opts: d.ps_opts, key: d.key, color: d.color.map(|c| (c.2, c.3)), clip: d.clip && self.clip_distances, flex: d.flex.is_some(), mv, samples };
         if !self.pipelines.contains_key(&id) {
             let slot = match self.build_pipeline(d, &vs_code, ps_code.as_ref(), mv, samples) {
@@ -1582,8 +1588,11 @@ impl Renderer {
         if !frame.uploads.is_empty() {
             trace(|| format!("renderer: uploaded {} static meshes ({:.1} MiB), {} resident", frame.uploads.len(), upload_bytes as f64 / 1048576.0, self.meshes.len()));
         }
-        let surface_tex = if present {
-            match self.surface.get_current_texture() {
+        let t = std::time::Instant::now();
+        let acquired = present.then(|| self.surface.get_current_texture());
+        ACQUIRE_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        let surface_tex = if let Some(acquired) = acquired {
+            match acquired {
                 wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
                 _ => {
                     self.surface.configure(&self.device, &self.config);
@@ -2305,6 +2314,7 @@ impl Renderer {
                         let t: &[u64] = bytemuck::cast_slice(&data);
                         let us = (t[1].saturating_sub(t[0]) as f64 * period as f64 / 1000.0) as u32;
                         out.store(us, std::sync::atomic::Ordering::Relaxed);
+                        GPU_US.store(us, std::sync::atomic::Ordering::Relaxed);
                     }
                     buf.unmap();
                 }
@@ -2325,7 +2335,9 @@ impl Renderer {
             });
         }
         if let Some(surface_tex) = surface_tex {
+            let t = std::time::Instant::now();
             self.queue.present(surface_tex);
+            PRESENT_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         let _ = self.device.poll(wgpu::PollType::Poll);
     }
@@ -2334,7 +2346,7 @@ impl Renderer {
 /// ShaderDeviceInfo_t vsync flag (bit 4)
 /// the fields `PipelineId` is built from (minus mv / samples, compared separately)
 fn same_pipeline(a: &DrawCmd, b: &DrawCmd) -> bool {
-    let shader = |x: &crate::api::ShaderRef, y: &crate::api::ShaderRef| Arc::ptr_eq(&x.name, &y.name) && x.static_index == y.static_index && x.dynamic == y.dynamic;
+    let shader = |x: &crate::api::ShaderRef, y: &crate::api::ShaderRef| x == y;
     shader(&a.vs, &b.vs)
         && shader(&a.ps, &b.ps)
         && a.format == b.format

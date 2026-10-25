@@ -13,6 +13,7 @@ pub mod lock;
 pub mod log;
 pub mod mesh;
 pub mod render;
+pub mod sampler;
 pub mod shader_util;
 pub mod shadow;
 pub mod texconv;

@@ -5,6 +5,44 @@ use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::Mutex;
 
+/// a shader name as a small id, so draws carry no refcounted strings (their refcounts would
+/// bounce between the game and render threads)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ShaderName(u32);
+
+static NAMES: std::sync::RwLock<Vec<std::sync::Arc<str>>> = std::sync::RwLock::new(Vec::new());
+
+impl ShaderName {
+    /// the depth-only null pixel shader
+    pub const NONE: ShaderName = ShaderName(u32::MAX);
+
+    pub fn intern(name: &str) -> ShaderName {
+        let mut names = NAMES.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = names.iter().position(|n| &**n == name) {
+            return ShaderName(i as u32);
+        }
+        names.push(name.into());
+        ShaderName(names.len() as u32 - 1)
+    }
+
+    pub fn is_none(self) -> bool {
+        self == ShaderName::NONE
+    }
+
+    pub fn get(self) -> std::sync::Arc<str> {
+        if self.is_none() {
+            return "".into();
+        }
+        NAMES.read().unwrap_or_else(|e| e.into_inner())[self.0 as usize].clone()
+    }
+}
+
+impl std::fmt::Display for ShaderName {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.get())
+    }
+}
+
 use crate::abi::*;
 
 /// enum values stay raw, as the material system passes them
@@ -30,9 +68,9 @@ pub struct ShadowState {
     pub cull: bool,
     pub vertex_format: VertexFormat,
     pub morph_format: u64,
-    pub vertex_shader: Option<std::sync::Arc<str>>,
+    pub vertex_shader: Option<ShaderName>,
     pub vertex_shader_static: i32,
-    pub pixel_shader: Option<std::sync::Arc<str>>,
+    pub pixel_shader: Option<ShaderName>,
     pub pixel_shader_static: i32,
     pub srgb_write: bool,
     pub srgb_read: u32,
@@ -228,14 +266,14 @@ unsafe extern "C" fn vertex_shader_vertex_format(_t: *mut c_void, flags: u32, te
 unsafe extern "C" fn set_vertex_shader(_t: *mut c_void, name: *const c_char, static_index: i32) {
     let name = cstr(name);
     set(|s| {
-        s.vertex_shader = name.map(Into::into);
+        s.vertex_shader = name.map(|n| ShaderName::intern(&n));
         s.vertex_shader_static = static_index;
     });
 }
 unsafe extern "C" fn set_pixel_shader(_t: *mut c_void, name: *const c_char, static_index: i32) {
     let name = cstr(name);
     set(|s| {
-        s.pixel_shader = name.map(Into::into);
+        s.pixel_shader = name.map(|n| ShaderName::intern(&n));
         s.pixel_shader_static = static_index;
     });
 }

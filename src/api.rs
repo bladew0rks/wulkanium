@@ -121,9 +121,9 @@ pub struct PipeKey {
 }
 
 /// the shadow state's name, its static index and the dynamic index at draw time
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ShaderRef {
-    pub name: std::sync::Arc<str>,
+    pub name: shadow::ShaderName,
     pub static_index: i32,
     pub dynamic: i32,
 }
@@ -602,10 +602,14 @@ pub fn draw_mesh(mesh: *mut Mesh, first: i32, count: i32) {
         log::line("draw with no bound material");
         return;
     }
+    let t = profiling().then(std::time::Instant::now);
     unsafe {
         let vt = *(material as *const *const usize);
         let f: unsafe extern "C" fn(usize, i32) = std::mem::transmute(*vt.add(MATERIAL_DRAW_MESH));
         f(material, 0); // VERTEX_COMPRESSION_NONE
+    }
+    if let Some(t) = t {
+        DRAW_MESH_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     with(|s| s.mesh = 0);
 }
@@ -1035,6 +1039,10 @@ fn push_draw(s: &mut State, c: Cmd) {
 }
 
 fn record_draw(s: &mut State) {
+    // a clock read costs ~40 ns under wine, so only time draws while profiling
+    if !profiling() {
+        return record_draw_inner(s);
+    }
     let start = std::time::Instant::now();
     record_draw_inner(s);
     s.frame.record_ms += start.elapsed().as_secs_f32() * 1000.0;
@@ -1045,10 +1053,23 @@ static PROF: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::Ato
 const PROF_NAMES: [&str; 9] = ["snapshot", "debug", "flex", "vs consts", "ps consts", "vs extra", "blocks", "draw cmd", "geometry"];
 
 /// WULKANIUM_PROFILE=1: time the record path (the timers themselves cost ~20 ns each)
+/// 0 = not decided yet, 1 = on, 2 = off
+static PROFILE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn profiling() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WULKANIUM_PROFILE").is_ok_and(|v| v != "0"))
+    match PROFILE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = std::env::var("WULKANIUM_PROFILE").is_ok_and(|v| v != "0");
+            PROFILE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+            on
+        }
+    }
 }
+
+/// ns inside IMesh::Draw (the whole material draw: shader dll code plus our api calls)
+static DRAW_MESH_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 struct Lap(Option<std::time::Instant>);
 impl Lap {
@@ -1107,7 +1128,7 @@ fn record_draw_inner(s: &mut State) {
         return;
     };
     // vs without ps is a depth-only pass (DepthWrite): "" stands for the null pixel shader
-    let (Some(vs_name), ps_name) = (snap.vertex_shader.clone(), snap.pixel_shader.clone().unwrap_or_else(|| std::sync::Arc::from(""))) else {
+    let (Some(vs_name), ps_name) = (snap.vertex_shader, snap.pixel_shader.unwrap_or(shadow::ShaderName::NONE)) else {
         s.frame.skipped_no_shader += 1;
         why_skipped(s, "no shaders");
         return;
@@ -1498,7 +1519,18 @@ fn capture_key() -> bool {
         static DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let down = unsafe { GetAsyncKeyState(VK_HOME as i32) } as u16 & 0x8000 != 0;
         let was = DOWN.swap(down, std::sync::atomic::Ordering::Relaxed);
-        down && !was
+        let pressed = down && !was;
+        // Shift+Home toggles profiling instead
+        let shift = unsafe { GetAsyncKeyState(windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT as i32) } as u16 & 0x8000 != 0;
+        if pressed && shift {
+            // the sampler only: the record-path timers cost more than they measure under wine
+            static SAMPLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let on = !SAMPLING.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+            log::line(&format!("sampler {}", if on { "on" } else { "off" }));
+            if on { crate::sampler::start() } else { crate::sampler::stop() }
+            return false;
+        }
+        pressed
     }
     #[cfg(not(windows))]
     false
@@ -1507,6 +1539,7 @@ fn capture_key() -> bool {
 pub fn present() {
     // lock order: shader mutex, then renderer
     let _shader = crate::lock::guard();
+    crate::sampler::note_thread(crate::sampler::Target::Game);
     let capture = capture_key();
     let (frame_no, draws, mat, frame) = with(|s| {
         if s.frames == s.trace_from {
@@ -1557,7 +1590,20 @@ pub fn present() {
         let calls = CALLS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
         let wait = PRESENT_WAIT_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
         let render = crate::render::RENDER_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
-        log::line(&format!("per frame: render thread {:.3} ms, game waited {:.3} ms{}", render as f64 / 1e6, wait as f64 / 1e6, if profiling() { format!(", {calls} api calls") } else { String::new() }));
+        let draw_mesh = DRAW_MESH_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        let mutex = crate::lock::WAIT_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        let lock = crate::lock::LOCK_WAIT_NS.swap(0, std::sync::atomic::Ordering::Relaxed) / span;
+        log::line(&format!(
+            "per frame: render thread {:.3} ms (acquire {:.3}, present {:.3}, gpu {:.3}), game waited {:.3} ms, shader mutex waits {:.3} ms (calls) / {:.3} ms (ShaderLock){}",
+            render as f64 / 1e6,
+            crate::render::ACQUIRE_NS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / span as f64 / 1e6,
+            crate::render::PRESENT_NS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / span as f64 / 1e6,
+            crate::render::GPU_US.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e3,
+            wait as f64 / 1e6,
+            mutex as f64 / 1e6,
+            lock as f64 / 1e6,
+            if profiling() { format!(", {calls} api calls, {:.3} ms in IMesh::Draw", draw_mesh as f64 / 1e6) } else { String::new() }
+        ));
     }
     crate::render::present(frame);
 }

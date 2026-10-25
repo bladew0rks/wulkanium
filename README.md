@@ -41,6 +41,7 @@ Copy `target/<triple>/release/shaderapiwgpu.dll` to `GarrysMod/bin/win64/` and l
 |---|---|
 | Insert | Overlay (fps, frame stats) |
 | Home | Log one frame of draws (capture) |
+| Shift+Home | Sampling profiler on/off (results go to the log) |
 | End | DLAA on/off (DLSS builds) |
 | Page Up / Page Down | DLSS input view / jitter pattern |
 | Scroll Lock | Shadow map view |

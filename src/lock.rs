@@ -4,10 +4,29 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lock_api::RawReentrantMutex;
-use parking_lot::{RawMutex, RawThreadId};
+use std::num::NonZeroUsize;
 
-static MUTEX: RawReentrantMutex<RawMutex, RawThreadId> = RawReentrantMutex::INIT;
+use lock_api::{GetThreadId, RawReentrantMutex};
+use parking_lot::RawMutex;
+
+/// os thread id; parking_lot's own goes through a thread_local, which is slow on windows
+pub struct OsThreadId;
+
+unsafe impl GetThreadId for OsThreadId {
+    const INIT: Self = OsThreadId;
+    fn nonzero_thread_id(&self) -> NonZeroUsize {
+        #[cfg(windows)]
+        let id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() } as usize;
+        #[cfg(not(windows))]
+        let id = {
+            thread_local!(static K: u8 = const { 0 });
+            K.with(|k| k as *const u8 as usize)
+        };
+        NonZeroUsize::new(id).expect("thread id is never 0")
+    }
+}
+
+static MUTEX: RawReentrantMutex<RawMutex, OsThreadId> = RawReentrantMutex::INIT;
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -30,9 +49,22 @@ impl Drop for Guard {
     }
 }
 
+/// ns spent waiting for the mutex while another thread held it (api calls / ShaderLock)
+pub static WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static LOCK_WAIT_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// lock, timing only the contended case
+fn lock_timed(counter: &std::sync::atomic::AtomicU64) {
+    if !MUTEX.try_lock() {
+        let t = std::time::Instant::now();
+        MUTEX.lock();
+        counter.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
 pub fn guard() -> Guard {
     if ENABLED.load(Ordering::SeqCst) {
-        MUTEX.lock();
+        lock_timed(&WAIT_NS);
         Guard(true)
     } else {
         Guard(false)
@@ -41,7 +73,7 @@ pub fn guard() -> Guard {
 
 pub fn shader_lock() {
     if ENABLED.load(Ordering::SeqCst) {
-        MUTEX.lock();
+        lock_timed(&LOCK_WAIT_NS);
         HELD.with(|h| h.set(h.get() + 1));
     }
 }
