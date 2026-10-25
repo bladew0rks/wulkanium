@@ -1,0 +1,2587 @@
+{
+ "IShaderAPI": {
+  "note": "IShaderDynamicAPI + IShaderAPI (sourcesdk-minimal x86-64-branch, identical re-declarations share the base slot) + one newer float-returning method. 258 slots; verified against GMod x64 shaderapiempty.dll and materialsystem.dll forwarders.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "SetViewports",
+    "sig": "virtual void SetViewports( int nCount, const ShaderViewport_t* pViewports )"
+   },
+   {
+    "slot": 1,
+    "name": "GetViewports",
+    "sig": "virtual int GetViewports( ShaderViewport_t* pViewports, int nMax )"
+   },
+   {
+    "slot": 2,
+    "name": "CurrentTime",
+    "sig": "virtual double CurrentTime()"
+   },
+   {
+    "slot": 3,
+    "name": "GetLightmapDimensions",
+    "sig": "virtual void GetLightmapDimensions( int *w, int *h )"
+   },
+   {
+    "slot": 4,
+    "name": "GetSceneFogMode",
+    "sig": "virtual MaterialFogMode_t GetSceneFogMode( )"
+   },
+   {
+    "slot": 5,
+    "name": "GetSceneFogColor",
+    "sig": "virtual void GetSceneFogColor( unsigned char *rgb )"
+   },
+   {
+    "slot": 6,
+    "name": "MatrixMode",
+    "sig": "virtual void MatrixMode( MaterialMatrixMode_t matrixMode )"
+   },
+   {
+    "slot": 7,
+    "name": "PushMatrix",
+    "sig": "virtual void PushMatrix()"
+   },
+   {
+    "slot": 8,
+    "name": "PopMatrix",
+    "sig": "virtual void PopMatrix()"
+   },
+   {
+    "slot": 9,
+    "name": "LoadMatrix",
+    "sig": "virtual void LoadMatrix( float *m )"
+   },
+   {
+    "slot": 10,
+    "name": "MultMatrix",
+    "sig": "virtual void MultMatrix( float *m )"
+   },
+   {
+    "slot": 11,
+    "name": "MultMatrixLocal",
+    "sig": "virtual void MultMatrixLocal( float *m )"
+   },
+   {
+    "slot": 12,
+    "name": "GetMatrix",
+    "sig": "virtual void GetMatrix( MaterialMatrixMode_t matrixMode, float *dst )"
+   },
+   {
+    "slot": 13,
+    "name": "LoadIdentity",
+    "sig": "virtual void LoadIdentity( void )"
+   },
+   {
+    "slot": 14,
+    "name": "LoadCameraToWorld",
+    "sig": "virtual void LoadCameraToWorld( void )"
+   },
+   {
+    "slot": 15,
+    "name": "Ortho",
+    "sig": "virtual void Ortho( double left, double right, double bottom, double top, double zNear, double zFar )"
+   },
+   {
+    "slot": 16,
+    "name": "PerspectiveX",
+    "sig": "virtual void PerspectiveX( double fovx, double aspect, double zNear, double zFar )"
+   },
+   {
+    "slot": 17,
+    "name": "PickMatrix",
+    "sig": "virtual void PickMatrix( int x, int y, int width, int height )"
+   },
+   {
+    "slot": 18,
+    "name": "Rotate",
+    "sig": "virtual void Rotate( float angle, float x, float y, float z )"
+   },
+   {
+    "slot": 19,
+    "name": "Translate",
+    "sig": "virtual void Translate( float x, float y, float z )"
+   },
+   {
+    "slot": 20,
+    "name": "Scale",
+    "sig": "virtual void Scale( float x, float y, float z )"
+   },
+   {
+    "slot": 21,
+    "name": "ScaleXY",
+    "sig": "virtual void ScaleXY( float x, float y )"
+   },
+   {
+    "slot": 22,
+    "name": "Color3f",
+    "sig": "virtual void Color3f( float r, float g, float b )"
+   },
+   {
+    "slot": 23,
+    "name": "Color3fv",
+    "sig": "virtual void Color3fv( float const* pColor )"
+   },
+   {
+    "slot": 24,
+    "name": "Color4f",
+    "sig": "virtual void Color4f( float r, float g, float b, float a )"
+   },
+   {
+    "slot": 25,
+    "name": "Color4fv",
+    "sig": "virtual void Color4fv( float const* pColor )"
+   },
+   {
+    "slot": 26,
+    "name": "Color3ub",
+    "sig": "virtual void Color3ub( unsigned char r, unsigned char g, unsigned char b )"
+   },
+   {
+    "slot": 27,
+    "name": "Color3ubv",
+    "sig": "virtual void Color3ubv( unsigned char const* pColor )"
+   },
+   {
+    "slot": 28,
+    "name": "Color4ub",
+    "sig": "virtual void Color4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )"
+   },
+   {
+    "slot": 29,
+    "name": "Color4ubv",
+    "sig": "virtual void Color4ubv( unsigned char const* pColor )"
+   },
+   {
+    "slot": 30,
+    "name": "SetVertexShaderConstant",
+    "sig": "virtual void SetVertexShaderConstant( int var, float const* pVec, int numConst = 1, bool bForce = false )"
+   },
+   {
+    "slot": 31,
+    "name": "SetPixelShaderConstant",
+    "sig": "virtual void SetPixelShaderConstant( int var, float const* pVec, int numConst = 1, bool bForce = false )"
+   },
+   {
+    "slot": 32,
+    "name": "SetDefaultState",
+    "sig": "virtual void SetDefaultState()"
+   },
+   {
+    "slot": 33,
+    "name": "GetWorldSpaceCameraPosition",
+    "sig": "virtual void GetWorldSpaceCameraPosition( float* pPos )"
+   },
+   {
+    "slot": 34,
+    "name": "GetCurrentNumBones",
+    "sig": "virtual int GetCurrentNumBones( void )"
+   },
+   {
+    "slot": 35,
+    "name": "GetCurrentLightCombo",
+    "sig": "virtual int GetCurrentLightCombo( void )"
+   },
+   {
+    "slot": 36,
+    "name": "GetCurrentFogType",
+    "sig": "virtual MaterialFogMode_t GetCurrentFogType( void )"
+   },
+   {
+    "slot": 37,
+    "name": "SetTextureTransformDimension",
+    "sig": "virtual void SetTextureTransformDimension( TextureStage_t textureStage, int dimension, bool projected )"
+   },
+   {
+    "slot": 38,
+    "name": "DisableTextureTransform",
+    "sig": "virtual void DisableTextureTransform( TextureStage_t textureStage )"
+   },
+   {
+    "slot": 39,
+    "name": "SetBumpEnvMatrix",
+    "sig": "virtual void SetBumpEnvMatrix( TextureStage_t textureStage, float m00, float m01, float m10, float m11 )"
+   },
+   {
+    "slot": 40,
+    "name": "SetVertexShaderIndex",
+    "sig": "virtual void SetVertexShaderIndex( int vshIndex = -1 )"
+   },
+   {
+    "slot": 41,
+    "name": "SetPixelShaderIndex",
+    "sig": "virtual void SetPixelShaderIndex( int pshIndex = 0 )"
+   },
+   {
+    "slot": 42,
+    "name": "GetBackBufferDimensions",
+    "sig": "virtual void GetBackBufferDimensions( int& width, int& height )"
+   },
+   {
+    "slot": 43,
+    "name": "GetMaxLights",
+    "sig": "virtual int GetMaxLights( void )"
+   },
+   {
+    "slot": 44,
+    "name": "GetLight",
+    "sig": "virtual const LightDesc_t& GetLight( int lightNum )"
+   },
+   {
+    "slot": 45,
+    "name": "SetPixelShaderFogParams",
+    "sig": "virtual void SetPixelShaderFogParams( int reg )"
+   },
+   {
+    "slot": 46,
+    "name": "SetVertexShaderStateAmbientLightCube",
+    "sig": "virtual void SetVertexShaderStateAmbientLightCube()"
+   },
+   {
+    "slot": 47,
+    "name": "SetPixelShaderStateAmbientLightCube",
+    "sig": "virtual void SetPixelShaderStateAmbientLightCube( int pshReg, bool bForceToBlack = false )"
+   },
+   {
+    "slot": 48,
+    "name": "CommitPixelShaderLighting",
+    "sig": "virtual void CommitPixelShaderLighting( int pshReg )"
+   },
+   {
+    "slot": 49,
+    "name": "GetVertexModifyBuilder",
+    "sig": "virtual CMeshBuilder* GetVertexModifyBuilder()"
+   },
+   {
+    "slot": 50,
+    "name": "InFlashlightMode",
+    "sig": "virtual bool InFlashlightMode()"
+   },
+   {
+    "slot": 51,
+    "name": "GetFlashlightState",
+    "sig": "virtual const FlashlightState_t &GetFlashlightState( VMatrix &worldToTexture )"
+   },
+   {
+    "slot": 52,
+    "name": "InEditorMode",
+    "sig": "virtual bool InEditorMode()"
+   },
+   {
+    "slot": 53,
+    "name": "GetBoundMorphFormat",
+    "sig": "virtual MorphFormat_t GetBoundMorphFormat()"
+   },
+   {
+    "slot": 54,
+    "name": "BindStandardTexture",
+    "sig": "virtual void BindStandardTexture( Sampler_t sampler, StandardTextureId_t id )"
+   },
+   {
+    "slot": 55,
+    "name": "GetRenderTargetEx",
+    "sig": "virtual ITexture *GetRenderTargetEx( int nRenderTargetID )"
+   },
+   {
+    "slot": 56,
+    "name": "SetToneMappingScaleLinear",
+    "sig": "virtual void SetToneMappingScaleLinear( const Vector &scale )"
+   },
+   {
+    "slot": 57,
+    "name": "GetToneMappingScaleLinear",
+    "sig": "virtual const Vector &GetToneMappingScaleLinear( void )"
+   },
+   {
+    "slot": 58,
+    "name": "GetLightMapScaleFactor",
+    "sig": "virtual float GetLightMapScaleFactor( void )"
+   },
+   {
+    "slot": 59,
+    "name": "LoadBoneMatrix",
+    "sig": "virtual void LoadBoneMatrix( int boneIndex, const float *m )"
+   },
+   {
+    "slot": 60,
+    "name": "PerspectiveOffCenterX",
+    "sig": "virtual void PerspectiveOffCenterX( double fovx, double aspect, double zNear, double zFar, double bottom, double top, double left, double right )"
+   },
+   {
+    "slot": 61,
+    "name": "SetFloatRenderingParameter",
+    "sig": "virtual void SetFloatRenderingParameter(int parm_number, float value)"
+   },
+   {
+    "slot": 62,
+    "name": "SetIntRenderingParameter",
+    "sig": "virtual void SetIntRenderingParameter(int parm_number, int value)"
+   },
+   {
+    "slot": 63,
+    "name": "SetVectorRenderingParameter",
+    "sig": "virtual void SetVectorRenderingParameter(int parm_number, Vector const &value)"
+   },
+   {
+    "slot": 64,
+    "name": "GetFloatRenderingParameter",
+    "sig": "virtual float GetFloatRenderingParameter(int parm_number)"
+   },
+   {
+    "slot": 65,
+    "name": "GetIntRenderingParameter",
+    "sig": "virtual int GetIntRenderingParameter(int parm_number)"
+   },
+   {
+    "slot": 66,
+    "name": "GetVectorRenderingParameter",
+    "sig": "virtual Vector GetVectorRenderingParameter(int parm_number)"
+   },
+   {
+    "slot": 67,
+    "name": "SetStencilEnable",
+    "sig": "virtual void SetStencilEnable(bool onoff)"
+   },
+   {
+    "slot": 68,
+    "name": "SetStencilFailOperation",
+    "sig": "virtual void SetStencilFailOperation(StencilOperation_t op)"
+   },
+   {
+    "slot": 69,
+    "name": "SetStencilZFailOperation",
+    "sig": "virtual void SetStencilZFailOperation(StencilOperation_t op)"
+   },
+   {
+    "slot": 70,
+    "name": "SetStencilPassOperation",
+    "sig": "virtual void SetStencilPassOperation(StencilOperation_t op)"
+   },
+   {
+    "slot": 71,
+    "name": "SetStencilCompareFunction",
+    "sig": "virtual void SetStencilCompareFunction(StencilComparisonFunction_t cmpfn)"
+   },
+   {
+    "slot": 72,
+    "name": "SetStencilReferenceValue",
+    "sig": "virtual void SetStencilReferenceValue(int ref)"
+   },
+   {
+    "slot": 73,
+    "name": "SetStencilTestMask",
+    "sig": "virtual void SetStencilTestMask(uint32 msk)"
+   },
+   {
+    "slot": 74,
+    "name": "SetStencilWriteMask",
+    "sig": "virtual void SetStencilWriteMask(uint32 msk)"
+   },
+   {
+    "slot": 75,
+    "name": "ClearStencilBufferRectangle",
+    "sig": "virtual void ClearStencilBufferRectangle( int xmin, int ymin, int xmax, int ymax,int value)"
+   },
+   {
+    "slot": 76,
+    "name": "GetDXLevelDefaults",
+    "sig": "virtual void GetDXLevelDefaults(uint &max_dxlevel,uint &recommended_dxlevel)"
+   },
+   {
+    "slot": 77,
+    "name": "GetFlashlightStateEx",
+    "sig": "virtual const FlashlightState_t &GetFlashlightStateEx( VMatrix &worldToTexture, ITexture **pFlashlightDepthTexture )"
+   },
+   {
+    "slot": 78,
+    "name": "GetAmbientLightCubeLuminance",
+    "sig": "virtual float GetAmbientLightCubeLuminance()"
+   },
+   {
+    "slot": 79,
+    "name": "GetDX9LightState",
+    "sig": "virtual void GetDX9LightState( LightState_t *state )"
+   },
+   {
+    "slot": 80,
+    "name": "GetPixelFogCombo",
+    "sig": "virtual int GetPixelFogCombo( )"
+   },
+   {
+    "slot": 81,
+    "name": "BindStandardVertexTexture",
+    "sig": "virtual void BindStandardVertexTexture( VertexTextureSampler_t sampler, StandardTextureId_t id )"
+   },
+   {
+    "slot": 82,
+    "name": "IsHWMorphingEnabled",
+    "sig": "virtual bool IsHWMorphingEnabled( )"
+   },
+   {
+    "slot": 83,
+    "name": "GetStandardTextureDimensions",
+    "sig": "virtual void GetStandardTextureDimensions( int *pWidth, int *pHeight, StandardTextureId_t id )"
+   },
+   {
+    "slot": 84,
+    "name": "SetBooleanVertexShaderConstant",
+    "sig": "virtual void SetBooleanVertexShaderConstant( int var, BOOL const* pVec, int numBools = 1, bool bForce = false )"
+   },
+   {
+    "slot": 85,
+    "name": "SetIntegerVertexShaderConstant",
+    "sig": "virtual void SetIntegerVertexShaderConstant( int var, int const* pVec, int numIntVecs = 1, bool bForce = false )"
+   },
+   {
+    "slot": 86,
+    "name": "SetBooleanPixelShaderConstant",
+    "sig": "virtual void SetBooleanPixelShaderConstant( int var, BOOL const* pVec, int numBools = 1, bool bForce = false )"
+   },
+   {
+    "slot": 87,
+    "name": "SetIntegerPixelShaderConstant",
+    "sig": "virtual void SetIntegerPixelShaderConstant( int var, int const* pVec, int numIntVecs = 1, bool bForce = false )"
+   },
+   {
+    "slot": 88,
+    "name": "ShouldWriteDepthToDestAlpha",
+    "sig": "virtual bool ShouldWriteDepthToDestAlpha( void )"
+   },
+   {
+    "slot": 89,
+    "name": "PushDeformation",
+    "sig": "virtual void PushDeformation( DeformationBase_t const *Deformation )"
+   },
+   {
+    "slot": 90,
+    "name": "PopDeformation",
+    "sig": "virtual void PopDeformation( )"
+   },
+   {
+    "slot": 91,
+    "name": "GetNumActiveDeformations",
+    "sig": "virtual int GetNumActiveDeformations()"
+   },
+   {
+    "slot": 92,
+    "name": "GetPackedDeformationInformation",
+    "sig": "virtual int GetPackedDeformationInformation( int nMaskOfUnderstoodDeformations, float *pConstantValuesOut, int nBufferSize, int nMaximumDeformations, int *pNumDefsOut )"
+   },
+   {
+    "slot": 93,
+    "name": "MarkUnusedVertexFields",
+    "sig": "virtual void MarkUnusedVertexFields( unsigned int nFlags, int nTexCoordCount, bool *pUnusedTexCoords )"
+   },
+   {
+    "slot": 94,
+    "name": "ExecuteCommandBuffer",
+    "sig": "virtual void ExecuteCommandBuffer( uint8 *pCmdBuffer )"
+   },
+   {
+    "slot": 95,
+    "name": "SetStandardTextureHandle",
+    "sig": "virtual void SetStandardTextureHandle( StandardTextureId_t nId, ShaderAPITextureHandle_t nHandle )"
+   },
+   {
+    "slot": 96,
+    "name": "GetCurrentColorCorrection",
+    "sig": "virtual void GetCurrentColorCorrection( ShaderColorCorrectionInfo_t* pInfo )"
+   },
+   {
+    "slot": 97,
+    "name": "SetPSNearAndFarZ",
+    "sig": "virtual void SetPSNearAndFarZ( int pshReg )"
+   },
+   {
+    "slot": 98,
+    "name": "SetDepthFeatheringPixelShaderConstant",
+    "sig": "virtual void SetDepthFeatheringPixelShaderConstant( int iConstant, float fDepthBlendScale )"
+   },
+   {
+    "slot": 99,
+    "name": "GMOD_SamplerBorderClamp",
+    "sig": "virtual void GMOD_SamplerBorderClamp( Sampler_t sSampler )"
+   },
+   {
+    "slot": 100,
+    "name": "ClearBuffers",
+    "sig": "virtual void ClearBuffers( bool bClearColor, bool bClearDepth, bool bClearStencil, int renderTargetWidth, int renderTargetHeight )"
+   },
+   {
+    "slot": 101,
+    "name": "ClearColor3ub",
+    "sig": "virtual void ClearColor3ub( unsigned char r, unsigned char g, unsigned char b )"
+   },
+   {
+    "slot": 102,
+    "name": "ClearColor4ub",
+    "sig": "virtual void ClearColor4ub( unsigned char r, unsigned char g, unsigned char b, unsigned char a )"
+   },
+   {
+    "slot": 103,
+    "name": "BindVertexShader",
+    "sig": "virtual void BindVertexShader( VertexShaderHandle_t hVertexShader )"
+   },
+   {
+    "slot": 104,
+    "name": "BindGeometryShader",
+    "sig": "virtual void BindGeometryShader( GeometryShaderHandle_t hGeometryShader )"
+   },
+   {
+    "slot": 105,
+    "name": "BindPixelShader",
+    "sig": "virtual void BindPixelShader( PixelShaderHandle_t hPixelShader )"
+   },
+   {
+    "slot": 106,
+    "name": "SetRasterState",
+    "sig": "virtual void SetRasterState( const ShaderRasterState_t& state )"
+   },
+   {
+    "slot": 107,
+    "name": "SetMode",
+    "sig": "virtual bool SetMode( void* hwnd, int nAdapter, const ShaderDeviceInfo_t &info )"
+   },
+   {
+    "slot": 108,
+    "name": "ChangeVideoMode",
+    "sig": "virtual void ChangeVideoMode( const ShaderDeviceInfo_t &info )"
+   },
+   {
+    "slot": 109,
+    "name": "TakeSnapshot",
+    "sig": "virtual StateSnapshot_t TakeSnapshot( )"
+   },
+   {
+    "slot": 110,
+    "name": "TexMinFilter",
+    "sig": "virtual void TexMinFilter( ShaderTexFilterMode_t texFilterMode )"
+   },
+   {
+    "slot": 111,
+    "name": "TexMagFilter",
+    "sig": "virtual void TexMagFilter( ShaderTexFilterMode_t texFilterMode )"
+   },
+   {
+    "slot": 112,
+    "name": "TexWrap",
+    "sig": "virtual void TexWrap( ShaderTexCoordComponent_t coord, ShaderTexWrapMode_t wrapMode )"
+   },
+   {
+    "slot": 113,
+    "name": "CopyRenderTargetToTexture",
+    "sig": "virtual void CopyRenderTargetToTexture( ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 114,
+    "name": "Bind",
+    "sig": "virtual void Bind( IMaterial* pMaterial )"
+   },
+   {
+    "slot": 115,
+    "name": "FlushBufferedPrimitives",
+    "sig": "virtual void FlushBufferedPrimitives()"
+   },
+   {
+    "slot": 116,
+    "name": "GetDynamicMesh",
+    "sig": "virtual IMesh* GetDynamicMesh( IMaterial* pMaterial, int nHWSkinBoneCount, bool bBuffered = true, IMesh* pVertexOverride = 0, IMesh* pIndexOverride = 0)"
+   },
+   {
+    "slot": 117,
+    "name": "GetDynamicMeshEx",
+    "sig": "virtual IMesh* GetDynamicMeshEx( IMaterial* pMaterial, VertexFormat_t vertexFormat, int nHWSkinBoneCount, bool bBuffered = true, IMesh* pVertexOverride = 0, IMesh* pIndexOverride = 0 )"
+   },
+   {
+    "slot": 118,
+    "name": "IsTranslucent",
+    "sig": "virtual bool IsTranslucent( StateSnapshot_t id )"
+   },
+   {
+    "slot": 119,
+    "name": "IsAlphaTested",
+    "sig": "virtual bool IsAlphaTested( StateSnapshot_t id )"
+   },
+   {
+    "slot": 120,
+    "name": "UsesVertexAndPixelShaders",
+    "sig": "virtual bool UsesVertexAndPixelShaders( StateSnapshot_t id )"
+   },
+   {
+    "slot": 121,
+    "name": "IsDepthWriteEnabled",
+    "sig": "virtual bool IsDepthWriteEnabled( StateSnapshot_t id )"
+   },
+   {
+    "slot": 122,
+    "name": "ComputeVertexFormat",
+    "sig": "virtual VertexFormat_t ComputeVertexFormat( int numSnapshots, StateSnapshot_t* pIds )"
+   },
+   {
+    "slot": 123,
+    "name": "ComputeVertexUsage",
+    "sig": "virtual VertexFormat_t ComputeVertexUsage( int numSnapshots, StateSnapshot_t* pIds )"
+   },
+   {
+    "slot": 124,
+    "name": "BeginPass",
+    "sig": "virtual void BeginPass( StateSnapshot_t snapshot )"
+   },
+   {
+    "slot": 125,
+    "name": "RenderPass",
+    "sig": "virtual void RenderPass( int nPass, int nPassCount )"
+   },
+   {
+    "slot": 126,
+    "name": "SetNumBoneWeights",
+    "sig": "virtual void SetNumBoneWeights( int numBones )"
+   },
+   {
+    "slot": 127,
+    "name": "SetLight",
+    "sig": "virtual void SetLight( int lightNum, const LightDesc_t& desc )"
+   },
+   {
+    "slot": 128,
+    "name": "SetLightingOrigin",
+    "sig": "virtual void SetLightingOrigin( Vector vLightingOrigin )"
+   },
+   {
+    "slot": 129,
+    "name": "SetAmbientLight",
+    "sig": "virtual void SetAmbientLight( float r, float g, float b )"
+   },
+   {
+    "slot": 130,
+    "name": "SetAmbientLightCube",
+    "sig": "virtual void SetAmbientLightCube( Vector4D cube[6] )"
+   },
+   {
+    "slot": 131,
+    "name": "ShadeMode",
+    "sig": "virtual void ShadeMode( ShaderShadeMode_t mode )"
+   },
+   {
+    "slot": 132,
+    "name": "CullMode",
+    "sig": "virtual void CullMode( MaterialCullMode_t cullMode )"
+   },
+   {
+    "slot": 133,
+    "name": "ForceDepthFuncEquals",
+    "sig": "virtual void ForceDepthFuncEquals( bool bEnable )"
+   },
+   {
+    "slot": 134,
+    "name": "OverrideDepthEnable",
+    "sig": "virtual void OverrideDepthEnable( bool bEnable, bool bDepthEnable )"
+   },
+   {
+    "slot": 135,
+    "name": "SetHeightClipZ",
+    "sig": "virtual void SetHeightClipZ( float z )"
+   },
+   {
+    "slot": 136,
+    "name": "SetHeightClipMode",
+    "sig": "virtual void SetHeightClipMode( enum MaterialHeightClipMode_t heightClipMode )"
+   },
+   {
+    "slot": 137,
+    "name": "SetClipPlane",
+    "sig": "virtual void SetClipPlane( int index, const float *pPlane )"
+   },
+   {
+    "slot": 138,
+    "name": "EnableClipPlane",
+    "sig": "virtual void EnableClipPlane( int index, bool bEnable )"
+   },
+   {
+    "slot": 139,
+    "name": "SetSkinningMatrices",
+    "sig": "virtual void SetSkinningMatrices()"
+   },
+   {
+    "slot": 140,
+    "name": "GetNearestSupportedFormat",
+    "sig": "virtual ImageFormat GetNearestSupportedFormat( ImageFormat fmt, bool bFilteringRequired = true )"
+   },
+   {
+    "slot": 141,
+    "name": "GetNearestRenderTargetFormat",
+    "sig": "virtual ImageFormat GetNearestRenderTargetFormat( ImageFormat fmt )"
+   },
+   {
+    "slot": 142,
+    "name": "DoRenderTargetsNeedSeparateDepthBuffer",
+    "sig": "virtual bool DoRenderTargetsNeedSeparateDepthBuffer()"
+   },
+   {
+    "slot": 143,
+    "name": "CreateTexture",
+    "sig": "virtual ShaderAPITextureHandle_t CreateTexture( int width, int height, int depth, ImageFormat dstImageFormat, int numMipLevels, int numCopies, int flags, const char *pDebugName, const char *pTextureGroupName )"
+   },
+   {
+    "slot": 144,
+    "name": "DeleteTexture",
+    "sig": "virtual void DeleteTexture( ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 145,
+    "name": "CreateDepthTexture",
+    "sig": "virtual ShaderAPITextureHandle_t CreateDepthTexture( ImageFormat renderTargetFormat, int width, int height, const char *pDebugName, bool bTexture )"
+   },
+   {
+    "slot": 146,
+    "name": "IsTexture",
+    "sig": "virtual bool IsTexture( ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 147,
+    "name": "IsTextureResident",
+    "sig": "virtual bool IsTextureResident( ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 148,
+    "name": "ModifyTexture",
+    "sig": "virtual void ModifyTexture( ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 149,
+    "name": "TexImage2D",
+    "sig": "virtual void TexImage2D( int level, int cubeFaceID, ImageFormat dstFormat, int zOffset, int width, int height, ImageFormat srcFormat, bool bSrcIsTiled, void *imageData )"
+   },
+   {
+    "slot": 150,
+    "name": "TexSubImage2D",
+    "sig": "virtual void TexSubImage2D( int level, int cubeFaceID, int xOffset, int yOffset, int zOffset, int width, int height, ImageFormat srcFormat, int srcStride, bool bSrcIsTiled, void *imageData )"
+   },
+   {
+    "slot": 151,
+    "name": "TexImageFromVTF",
+    "sig": "virtual void TexImageFromVTF( IVTFTexture* pVTF, int iVTFFrame )"
+   },
+   {
+    "slot": 152,
+    "name": "TexLock",
+    "sig": "virtual bool TexLock( int level, int cubeFaceID, int xOffset, int yOffset, int width, int height, CPixelWriter& writer )"
+   },
+   {
+    "slot": 153,
+    "name": "TexUnlock",
+    "sig": "virtual void TexUnlock( )"
+   },
+   {
+    "slot": 154,
+    "name": "TexSetPriority",
+    "sig": "virtual void TexSetPriority( int priority )"
+   },
+   {
+    "slot": 155,
+    "name": "BindTexture",
+    "sig": "virtual void BindTexture( Sampler_t sampler, ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 156,
+    "name": "SetRenderTarget",
+    "sig": "virtual void SetRenderTarget( ShaderAPITextureHandle_t colorTextureHandle = SHADER_RENDERTARGET_BACKBUFFER, ShaderAPITextureHandle_t depthTextureHandle = SHADER_RENDERTARGET_DEPTHBUFFER )"
+   },
+   {
+    "slot": 157,
+    "name": "ClearBuffersObeyStencil",
+    "sig": "virtual void ClearBuffersObeyStencil( bool bClearColor, bool bClearDepth )"
+   },
+   {
+    "slot": 158,
+    "name": "ReadPixels",
+    "sig": "virtual void ReadPixels( Rect_t *pSrcRect, Rect_t *pDstRect, unsigned char *data, ImageFormat dstFormat, int nDstStride )"
+   },
+   {
+    "slot": 159,
+    "name": "ReadPixels",
+    "sig": "virtual void ReadPixels( int x, int y, int width, int height, unsigned char *data, ImageFormat dstFormat )"
+   },
+   {
+    "slot": 160,
+    "name": "FlushHardware",
+    "sig": "virtual void FlushHardware()"
+   },
+   {
+    "slot": 161,
+    "name": "BeginFrame",
+    "sig": "virtual void BeginFrame()"
+   },
+   {
+    "slot": 162,
+    "name": "EndFrame",
+    "sig": "virtual void EndFrame()"
+   },
+   {
+    "slot": 163,
+    "name": "SelectionMode",
+    "sig": "virtual int SelectionMode( bool selectionMode )"
+   },
+   {
+    "slot": 164,
+    "name": "SelectionBuffer",
+    "sig": "virtual void SelectionBuffer( unsigned int* pBuffer, int size )"
+   },
+   {
+    "slot": 165,
+    "name": "ClearSelectionNames",
+    "sig": "virtual void ClearSelectionNames( )"
+   },
+   {
+    "slot": 166,
+    "name": "LoadSelectionName",
+    "sig": "virtual void LoadSelectionName( int name )"
+   },
+   {
+    "slot": 167,
+    "name": "PushSelectionName",
+    "sig": "virtual void PushSelectionName( int name )"
+   },
+   {
+    "slot": 168,
+    "name": "PopSelectionName",
+    "sig": "virtual void PopSelectionName()"
+   },
+   {
+    "slot": 169,
+    "name": "ForceHardwareSync",
+    "sig": "virtual void ForceHardwareSync()"
+   },
+   {
+    "slot": 170,
+    "name": "ClearSnapshots",
+    "sig": "virtual void ClearSnapshots()"
+   },
+   {
+    "slot": 171,
+    "name": "FogStart",
+    "sig": "virtual void FogStart( float fStart )"
+   },
+   {
+    "slot": 172,
+    "name": "FogEnd",
+    "sig": "virtual void FogEnd( float fEnd )"
+   },
+   {
+    "slot": 173,
+    "name": "SetFogZ",
+    "sig": "virtual void SetFogZ( float fogZ )"
+   },
+   {
+    "slot": 174,
+    "name": "SceneFogColor3ub",
+    "sig": "virtual void SceneFogColor3ub( unsigned char r, unsigned char g, unsigned char b )"
+   },
+   {
+    "slot": 175,
+    "name": "SceneFogMode",
+    "sig": "virtual void SceneFogMode( MaterialFogMode_t fogMode )"
+   },
+   {
+    "slot": 176,
+    "name": "CanDownloadTextures",
+    "sig": "virtual bool CanDownloadTextures()"
+   },
+   {
+    "slot": 177,
+    "name": "ResetRenderState",
+    "sig": "virtual void ResetRenderState( bool bFullReset = true )"
+   },
+   {
+    "slot": 178,
+    "name": "GetCurrentDynamicVBSize",
+    "sig": "virtual int GetCurrentDynamicVBSize( void )"
+   },
+   {
+    "slot": 179,
+    "name": "DestroyVertexBuffers",
+    "sig": "virtual void DestroyVertexBuffers( bool bExitingLevel = false )"
+   },
+   {
+    "slot": 180,
+    "name": "EvictManagedResources",
+    "sig": "virtual void EvictManagedResources()"
+   },
+   {
+    "slot": 181,
+    "name": "SetAnisotropicLevel",
+    "sig": "virtual void SetAnisotropicLevel( int nAnisotropyLevel )"
+   },
+   {
+    "slot": 182,
+    "name": "SyncToken",
+    "sig": "virtual void SyncToken( const char *pToken )"
+   },
+   {
+    "slot": 183,
+    "name": "SetStandardVertexShaderConstants",
+    "sig": "virtual void SetStandardVertexShaderConstants( float fOverbright )"
+   },
+   {
+    "slot": 184,
+    "name": "CreateOcclusionQueryObject",
+    "sig": "virtual ShaderAPIOcclusionQuery_t CreateOcclusionQueryObject( void )"
+   },
+   {
+    "slot": 185,
+    "name": "DestroyOcclusionQueryObject",
+    "sig": "virtual void DestroyOcclusionQueryObject( ShaderAPIOcclusionQuery_t )"
+   },
+   {
+    "slot": 186,
+    "name": "BeginOcclusionQueryDrawing",
+    "sig": "virtual void BeginOcclusionQueryDrawing( ShaderAPIOcclusionQuery_t )"
+   },
+   {
+    "slot": 187,
+    "name": "EndOcclusionQueryDrawing",
+    "sig": "virtual void EndOcclusionQueryDrawing( ShaderAPIOcclusionQuery_t )"
+   },
+   {
+    "slot": 188,
+    "name": "OcclusionQuery_GetNumPixelsRendered",
+    "sig": "virtual int OcclusionQuery_GetNumPixelsRendered( ShaderAPIOcclusionQuery_t hQuery, bool bFlush = false )"
+   },
+   {
+    "slot": 189,
+    "name": "SetFlashlightState",
+    "sig": "virtual void SetFlashlightState( const FlashlightState_t &state, const VMatrix &worldToTexture )"
+   },
+   {
+    "slot": 190,
+    "name": "ClearVertexAndPixelShaderRefCounts",
+    "sig": "virtual void ClearVertexAndPixelShaderRefCounts()"
+   },
+   {
+    "slot": 191,
+    "name": "PurgeUnusedVertexAndPixelShaders",
+    "sig": "virtual void PurgeUnusedVertexAndPixelShaders()"
+   },
+   {
+    "slot": 192,
+    "name": "DXSupportLevelChanged",
+    "sig": "virtual void DXSupportLevelChanged()"
+   },
+   {
+    "slot": 193,
+    "name": "EnableUserClipTransformOverride",
+    "sig": "virtual void EnableUserClipTransformOverride( bool bEnable )"
+   },
+   {
+    "slot": 194,
+    "name": "UserClipTransform",
+    "sig": "virtual void UserClipTransform( const VMatrix &worldToView )"
+   },
+   {
+    "slot": 195,
+    "name": "ComputeMorphFormat",
+    "sig": "virtual MorphFormat_t ComputeMorphFormat( int numSnapshots, StateSnapshot_t* pIds )"
+   },
+   {
+    "slot": 196,
+    "name": "SetRenderTargetEx",
+    "sig": "virtual void SetRenderTargetEx( int nRenderTargetID, ShaderAPITextureHandle_t colorTextureHandle = SHADER_RENDERTARGET_BACKBUFFER, ShaderAPITextureHandle_t depthTextureHandle = SHADER_RENDERTARGET_DEPTHBUFFER )"
+   },
+   {
+    "slot": 197,
+    "name": "CopyRenderTargetToTextureEx",
+    "sig": "virtual void CopyRenderTargetToTextureEx( ShaderAPITextureHandle_t textureHandle, int nRenderTargetID, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL )"
+   },
+   {
+    "slot": 198,
+    "name": "CopyTextureToRenderTargetEx",
+    "sig": "virtual void CopyTextureToRenderTargetEx( int nRenderTargetID, ShaderAPITextureHandle_t textureHandle, Rect_t *pSrcRect = NULL, Rect_t *pDstRect = NULL )"
+   },
+   {
+    "slot": 199,
+    "name": "HandleDeviceLost",
+    "sig": "virtual void HandleDeviceLost()"
+   },
+   {
+    "slot": 200,
+    "name": "EnableLinearColorSpaceFrameBuffer",
+    "sig": "virtual void EnableLinearColorSpaceFrameBuffer( bool bEnable )"
+   },
+   {
+    "slot": 201,
+    "name": "SetFullScreenTextureHandle",
+    "sig": "virtual void SetFullScreenTextureHandle( ShaderAPITextureHandle_t h )"
+   },
+   {
+    "slot": 202,
+    "name": "SetFastClipPlane",
+    "sig": "virtual void SetFastClipPlane( const float *pPlane )"
+   },
+   {
+    "slot": 203,
+    "name": "EnableFastClip",
+    "sig": "virtual void EnableFastClip( bool bEnable )"
+   },
+   {
+    "slot": 204,
+    "name": "GetMaxToRender",
+    "sig": "virtual void GetMaxToRender( IMesh *pMesh, bool bMaxUntilFlush, int *pMaxVerts, int *pMaxIndices )"
+   },
+   {
+    "slot": 205,
+    "name": "GetMaxVerticesToRender",
+    "sig": "virtual int GetMaxVerticesToRender( IMaterial *pMaterial )"
+   },
+   {
+    "slot": 206,
+    "name": "GetMaxIndicesToRender",
+    "sig": "virtual int GetMaxIndicesToRender( )"
+   },
+   {
+    "slot": 207,
+    "name": "DisableAllLocalLights",
+    "sig": "virtual void DisableAllLocalLights()"
+   },
+   {
+    "slot": 208,
+    "name": "CompareSnapshots",
+    "sig": "virtual int CompareSnapshots( StateSnapshot_t snapshot0, StateSnapshot_t snapshot1 )"
+   },
+   {
+    "slot": 209,
+    "name": "GetFlexMesh",
+    "sig": "virtual IMesh *GetFlexMesh()"
+   },
+   {
+    "slot": 210,
+    "name": "SetFlashlightStateEx",
+    "sig": "virtual void SetFlashlightStateEx( const FlashlightState_t &state, const VMatrix &worldToTexture, ITexture *pFlashlightDepthTexture )"
+   },
+   {
+    "slot": 211,
+    "name": "SupportsMSAAMode",
+    "sig": "virtual bool SupportsMSAAMode( int nMSAAMode )"
+   },
+   {
+    "slot": 212,
+    "name": "OwnGPUResources",
+    "sig": "virtual bool OwnGPUResources( bool bEnable )"
+   },
+   {
+    "slot": 213,
+    "name": "GetFogDistances",
+    "sig": "virtual void GetFogDistances( float *fStart, float *fEnd, float *fFogZ )"
+   },
+   {
+    "slot": 214,
+    "name": "BeginPIXEvent",
+    "sig": "virtual void BeginPIXEvent( unsigned long color, const char *szName )"
+   },
+   {
+    "slot": 215,
+    "name": "EndPIXEvent",
+    "sig": "virtual void EndPIXEvent()"
+   },
+   {
+    "slot": 216,
+    "name": "SetPIXMarker",
+    "sig": "virtual void SetPIXMarker( unsigned long color, const char *szName )"
+   },
+   {
+    "slot": 217,
+    "name": "EnableAlphaToCoverage",
+    "sig": "virtual void EnableAlphaToCoverage()"
+   },
+   {
+    "slot": 218,
+    "name": "DisableAlphaToCoverage",
+    "sig": "virtual void DisableAlphaToCoverage()"
+   },
+   {
+    "slot": 219,
+    "name": "ComputeVertexDescription",
+    "sig": "virtual void ComputeVertexDescription( unsigned char* pBuffer, VertexFormat_t vertexFormat, MeshDesc_t& desc )"
+   },
+   {
+    "slot": 220,
+    "name": "SupportsShadowDepthTextures",
+    "sig": "virtual bool SupportsShadowDepthTextures( void )"
+   },
+   {
+    "slot": 221,
+    "name": "SetDisallowAccess",
+    "sig": "virtual void SetDisallowAccess( bool )"
+   },
+   {
+    "slot": 222,
+    "name": "EnableShaderShaderMutex",
+    "sig": "virtual void EnableShaderShaderMutex( bool )"
+   },
+   {
+    "slot": 223,
+    "name": "ShaderLock",
+    "sig": "virtual void ShaderLock()"
+   },
+   {
+    "slot": 224,
+    "name": "ShaderUnlock",
+    "sig": "virtual void ShaderUnlock()"
+   },
+   {
+    "slot": 225,
+    "name": "GetShadowDepthTextureFormat",
+    "sig": "virtual ImageFormat GetShadowDepthTextureFormat( void )"
+   },
+   {
+    "slot": 226,
+    "name": "SupportsFetch4",
+    "sig": "virtual bool SupportsFetch4( void )"
+   },
+   {
+    "slot": 227,
+    "name": "SetShadowDepthBiasFactors",
+    "sig": "virtual void SetShadowDepthBiasFactors( float fShadowSlopeScaleDepthBias, float fShadowDepthBias )"
+   },
+   {
+    "slot": 228,
+    "name": "BindVertexBuffer",
+    "sig": "virtual void BindVertexBuffer( int nStreamID, IVertexBuffer *pVertexBuffer, int nOffsetInBytes, int nFirstVertex, int nVertexCount, VertexFormat_t fmt, int nRepetitions = 1 )"
+   },
+   {
+    "slot": 229,
+    "name": "BindIndexBuffer",
+    "sig": "virtual void BindIndexBuffer( IIndexBuffer *pIndexBuffer, int nOffsetInBytes )"
+   },
+   {
+    "slot": 230,
+    "name": "Draw",
+    "sig": "virtual void Draw( MaterialPrimitiveType_t primitiveType, int nFirstIndex, int nIndexCount )"
+   },
+   {
+    "slot": 231,
+    "name": "PerformFullScreenStencilOperation",
+    "sig": "virtual void PerformFullScreenStencilOperation( void )"
+   },
+   {
+    "slot": 232,
+    "name": "SetScissorRect",
+    "sig": "virtual void SetScissorRect( const int nLeft, const int nTop, const int nRight, const int nBottom, const bool bEnableScissor )"
+   },
+   {
+    "slot": 233,
+    "name": "SupportsCSAAMode",
+    "sig": "virtual bool SupportsCSAAMode( int nNumSamples, int nQualityLevel )"
+   },
+   {
+    "slot": 234,
+    "name": "InvalidateDelayedShaderConstants",
+    "sig": "virtual void InvalidateDelayedShaderConstants( void )"
+   },
+   {
+    "slot": 235,
+    "name": "GammaToLinear_HardwareSpecific",
+    "sig": "virtual float GammaToLinear_HardwareSpecific( float fGamma )"
+   },
+   {
+    "slot": 236,
+    "name": "LinearToGamma_HardwareSpecific",
+    "sig": "virtual float LinearToGamma_HardwareSpecific( float fLinear )"
+   },
+   {
+    "slot": 237,
+    "name": "SetLinearToGammaConversionTextures",
+    "sig": "virtual void SetLinearToGammaConversionTextures( ShaderAPITextureHandle_t hSRGBWriteEnabledTexture, ShaderAPITextureHandle_t hIdentityTexture )"
+   },
+   {
+    "slot": 238,
+    "name": "GetNullTextureFormat",
+    "sig": "virtual ImageFormat GetNullTextureFormat( void )"
+   },
+   {
+    "slot": 239,
+    "name": "BindVertexTexture",
+    "sig": "virtual void BindVertexTexture( VertexTextureSampler_t nSampler, ShaderAPITextureHandle_t textureHandle )"
+   },
+   {
+    "slot": 240,
+    "name": "EnableHWMorphing",
+    "sig": "virtual void EnableHWMorphing( bool bEnable )"
+   },
+   {
+    "slot": 241,
+    "name": "SetFlexWeights",
+    "sig": "virtual void SetFlexWeights( int nFirstWeight, int nCount, const MorphWeight_t* pWeights )"
+   },
+   {
+    "slot": 242,
+    "name": "FogMaxDensity",
+    "sig": "virtual void FogMaxDensity( float flMaxDensity )"
+   },
+   {
+    "slot": 243,
+    "name": "CreateTextures",
+    "sig": "virtual void CreateTextures( ShaderAPITextureHandle_t *pHandles, int count, int width, int height, int depth, ImageFormat dstImageFormat, int numMipLevels, int numCopies, int flags, const char *pDebugName, const char *pTextureGroupName )"
+   },
+   {
+    "slot": 244,
+    "name": "AcquireThreadOwnership",
+    "sig": "virtual void AcquireThreadOwnership()"
+   },
+   {
+    "slot": 245,
+    "name": "ReleaseThreadOwnership",
+    "sig": "virtual void ReleaseThreadOwnership()"
+   },
+   {
+    "slot": 246,
+    "name": "SupportsNormalMapCompression",
+    "sig": "virtual bool SupportsNormalMapCompression()"
+   },
+   {
+    "slot": 247,
+    "name": "EnableBuffer2FramesAhead",
+    "sig": "virtual void EnableBuffer2FramesAhead( bool bEnable )"
+   },
+   {
+    "slot": 248,
+    "name": "PrintfVA",
+    "sig": "virtual void PrintfVA( char *fmt, va_list vargs )"
+   },
+   {
+    "slot": 249,
+    "name": "Printf",
+    "sig": "virtual void Printf( PRINTF_FORMAT_STRING const char *fmt, ... )"
+   },
+   {
+    "slot": 250,
+    "name": "Knob",
+    "sig": "virtual float Knob( char *knobname, float *setvalue = NULL )"
+   },
+   {
+    "slot": 251,
+    "name": "OverrideAlphaWriteEnable",
+    "sig": "virtual void OverrideAlphaWriteEnable( bool bEnable, bool bAlphaWriteEnable )"
+   },
+   {
+    "slot": 252,
+    "name": "OverrideColorWriteEnable",
+    "sig": "virtual void OverrideColorWriteEnable( bool bOverrideEnable, bool bColorWriteEnable )"
+   },
+   {
+    "slot": 253,
+    "name": "ClearBuffersObeyStencilEx",
+    "sig": "virtual void ClearBuffersObeyStencilEx( bool bClearColor, bool bClearAlpha, bool bClearDepth )"
+   },
+   {
+    "slot": 254,
+    "name": "GMOD_ForceFilterMode",
+    "sig": "virtual void GMOD_ForceFilterMode( bool forceFilter, int filterType )"
+   },
+   {
+    "slot": 255,
+    "name": "OverrideBlend",
+    "sig": "virtual void OverrideBlend( bool bOverrideEnable, bool bUseSeparateAlpha, int iSrcBlend, int iDestBlend, int iBlendFunc )"
+   },
+   {
+    "slot": 256,
+    "name": "OverrideBlendSeparateAlpha",
+    "sig": "virtual void OverrideBlendSeparateAlpha( bool bOverrideEnable, bool bUseSeparateAlpha, int iSrcBlend, int iDestBlend, int iBlendFunc )"
+   },
+   {
+    "slot": 257,
+    "name": "Unknown257",
+    "sig": "virtual float Unknown257()"
+   }
+  ]
+ },
+ "IShaderShadow": {
+  "note": "52 slots, verified.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "SetDefaultState",
+    "sig": "virtual void SetDefaultState()"
+   },
+   {
+    "slot": 1,
+    "name": "DepthFunc",
+    "sig": "virtual void DepthFunc( ShaderDepthFunc_t depthFunc )"
+   },
+   {
+    "slot": 2,
+    "name": "EnableDepthWrites",
+    "sig": "virtual void EnableDepthWrites( bool bEnable )"
+   },
+   {
+    "slot": 3,
+    "name": "EnableDepthTest",
+    "sig": "virtual void EnableDepthTest( bool bEnable )"
+   },
+   {
+    "slot": 4,
+    "name": "EnablePolyOffset",
+    "sig": "virtual void EnablePolyOffset( PolygonOffsetMode_t nOffsetMode )"
+   },
+   {
+    "slot": 5,
+    "name": "EnableStencil",
+    "sig": "virtual void EnableStencil( bool bEnable )"
+   },
+   {
+    "slot": 6,
+    "name": "StencilFunc",
+    "sig": "virtual void StencilFunc( ShaderStencilFunc_t stencilFunc )"
+   },
+   {
+    "slot": 7,
+    "name": "StencilPassOp",
+    "sig": "virtual void StencilPassOp( ShaderStencilOp_t stencilOp )"
+   },
+   {
+    "slot": 8,
+    "name": "StencilFailOp",
+    "sig": "virtual void StencilFailOp( ShaderStencilOp_t stencilOp )"
+   },
+   {
+    "slot": 9,
+    "name": "StencilDepthFailOp",
+    "sig": "virtual void StencilDepthFailOp( ShaderStencilOp_t stencilOp )"
+   },
+   {
+    "slot": 10,
+    "name": "StencilReference",
+    "sig": "virtual void StencilReference( int nReference )"
+   },
+   {
+    "slot": 11,
+    "name": "StencilMask",
+    "sig": "virtual void StencilMask( int nMask )"
+   },
+   {
+    "slot": 12,
+    "name": "StencilWriteMask",
+    "sig": "virtual void StencilWriteMask( int nMask )"
+   },
+   {
+    "slot": 13,
+    "name": "EnableColorWrites",
+    "sig": "virtual void EnableColorWrites( bool bEnable )"
+   },
+   {
+    "slot": 14,
+    "name": "EnableAlphaWrites",
+    "sig": "virtual void EnableAlphaWrites( bool bEnable )"
+   },
+   {
+    "slot": 15,
+    "name": "EnableBlending",
+    "sig": "virtual void EnableBlending( bool bEnable )"
+   },
+   {
+    "slot": 16,
+    "name": "BlendFunc",
+    "sig": "virtual void BlendFunc( ShaderBlendFactor_t srcFactor, ShaderBlendFactor_t dstFactor )"
+   },
+   {
+    "slot": 17,
+    "name": "EnableAlphaTest",
+    "sig": "virtual void EnableAlphaTest( bool bEnable )"
+   },
+   {
+    "slot": 18,
+    "name": "AlphaFunc",
+    "sig": "virtual void AlphaFunc( ShaderAlphaFunc_t alphaFunc, float alphaRef )"
+   },
+   {
+    "slot": 19,
+    "name": "PolyMode",
+    "sig": "virtual void PolyMode( ShaderPolyModeFace_t face, ShaderPolyMode_t polyMode )"
+   },
+   {
+    "slot": 20,
+    "name": "EnableCulling",
+    "sig": "virtual void EnableCulling( bool bEnable )"
+   },
+   {
+    "slot": 21,
+    "name": "EnableConstantColor",
+    "sig": "virtual void EnableConstantColor( bool bEnable )"
+   },
+   {
+    "slot": 22,
+    "name": "VertexShaderVertexFormat",
+    "sig": "virtual void VertexShaderVertexFormat( unsigned int nFlags, int nTexCoordCount, int* pTexCoordDimensions, int nUserDataSize )"
+   },
+   {
+    "slot": 23,
+    "name": "SetVertexShader",
+    "sig": "virtual void SetVertexShader( const char* pFileName, int nStaticVshIndex )"
+   },
+   {
+    "slot": 24,
+    "name": "SetPixelShader",
+    "sig": "virtual void SetPixelShader( const char* pFileName, int nStaticPshIndex = 0 )"
+   },
+   {
+    "slot": 25,
+    "name": "EnableLighting",
+    "sig": "virtual void EnableLighting( bool bEnable )"
+   },
+   {
+    "slot": 26,
+    "name": "EnableSpecular",
+    "sig": "virtual void EnableSpecular( bool bEnable )"
+   },
+   {
+    "slot": 27,
+    "name": "EnableSRGBWrite",
+    "sig": "virtual void EnableSRGBWrite( bool bEnable )"
+   },
+   {
+    "slot": 28,
+    "name": "EnableSRGBRead",
+    "sig": "virtual void EnableSRGBRead( Sampler_t sampler, bool bEnable )"
+   },
+   {
+    "slot": 29,
+    "name": "EnableVertexBlend",
+    "sig": "virtual void EnableVertexBlend( bool bEnable )"
+   },
+   {
+    "slot": 30,
+    "name": "OverbrightValue",
+    "sig": "virtual void OverbrightValue( TextureStage_t stage, float value )"
+   },
+   {
+    "slot": 31,
+    "name": "EnableTexture",
+    "sig": "virtual void EnableTexture( Sampler_t sampler, bool bEnable )"
+   },
+   {
+    "slot": 32,
+    "name": "EnableTexGen",
+    "sig": "virtual void EnableTexGen( TextureStage_t stage, bool bEnable )"
+   },
+   {
+    "slot": 33,
+    "name": "TexGen",
+    "sig": "virtual void TexGen( TextureStage_t stage, ShaderTexGenParam_t param )"
+   },
+   {
+    "slot": 34,
+    "name": "EnableCustomPixelPipe",
+    "sig": "virtual void EnableCustomPixelPipe( bool bEnable )"
+   },
+   {
+    "slot": 35,
+    "name": "CustomTextureStages",
+    "sig": "virtual void CustomTextureStages( int stageCount )"
+   },
+   {
+    "slot": 36,
+    "name": "CustomTextureOperation",
+    "sig": "virtual void CustomTextureOperation( TextureStage_t stage, ShaderTexChannel_t channel, ShaderTexOp_t op, ShaderTexArg_t arg1, ShaderTexArg_t arg2 )"
+   },
+   {
+    "slot": 37,
+    "name": "DrawFlags",
+    "sig": "virtual void DrawFlags( unsigned int drawFlags )"
+   },
+   {
+    "slot": 38,
+    "name": "EnableAlphaPipe",
+    "sig": "virtual void EnableAlphaPipe( bool bEnable )"
+   },
+   {
+    "slot": 39,
+    "name": "EnableConstantAlpha",
+    "sig": "virtual void EnableConstantAlpha( bool bEnable )"
+   },
+   {
+    "slot": 40,
+    "name": "EnableVertexAlpha",
+    "sig": "virtual void EnableVertexAlpha( bool bEnable )"
+   },
+   {
+    "slot": 41,
+    "name": "EnableTextureAlpha",
+    "sig": "virtual void EnableTextureAlpha( TextureStage_t stage, bool bEnable )"
+   },
+   {
+    "slot": 42,
+    "name": "EnableBlendingSeparateAlpha",
+    "sig": "virtual void EnableBlendingSeparateAlpha( bool bEnable )"
+   },
+   {
+    "slot": 43,
+    "name": "BlendFuncSeparateAlpha",
+    "sig": "virtual void BlendFuncSeparateAlpha( ShaderBlendFactor_t srcFactor, ShaderBlendFactor_t dstFactor )"
+   },
+   {
+    "slot": 44,
+    "name": "FogMode",
+    "sig": "virtual void FogMode( ShaderFogMode_t fogMode )"
+   },
+   {
+    "slot": 45,
+    "name": "SetDiffuseMaterialSource",
+    "sig": "virtual void SetDiffuseMaterialSource( ShaderMaterialSource_t materialSource )"
+   },
+   {
+    "slot": 46,
+    "name": "SetMorphFormat",
+    "sig": "virtual void SetMorphFormat( MorphFormat_t flags )"
+   },
+   {
+    "slot": 47,
+    "name": "DisableFogGammaCorrection",
+    "sig": "virtual void DisableFogGammaCorrection( bool bDisable )"
+   },
+   {
+    "slot": 48,
+    "name": "EnableAlphaToCoverage",
+    "sig": "virtual void EnableAlphaToCoverage( bool bEnable )"
+   },
+   {
+    "slot": 49,
+    "name": "SetShadowDepthFiltering",
+    "sig": "virtual void SetShadowDepthFiltering( Sampler_t stage )"
+   },
+   {
+    "slot": 50,
+    "name": "BlendOp",
+    "sig": "virtual void BlendOp( ShaderBlendOp_t blendOp )"
+   },
+   {
+    "slot": 51,
+    "name": "BlendOpSeparateAlpha",
+    "sig": "virtual void BlendOpSeparateAlpha( ShaderBlendOp_t blendOp )"
+   }
+  ]
+ },
+ "IShaderDevice": {
+  "note": "33 slots (no GetDisplayDeviceName), verified.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "ReleaseResources",
+    "sig": "virtual void ReleaseResources()"
+   },
+   {
+    "slot": 1,
+    "name": "ReacquireResources",
+    "sig": "virtual void ReacquireResources()"
+   },
+   {
+    "slot": 2,
+    "name": "GetBackBufferFormat",
+    "sig": "virtual ImageFormat GetBackBufferFormat()"
+   },
+   {
+    "slot": 3,
+    "name": "GetBackBufferDimensions",
+    "sig": "virtual void GetBackBufferDimensions( int& width, int& height )"
+   },
+   {
+    "slot": 4,
+    "name": "GetCurrentAdapter",
+    "sig": "virtual int GetCurrentAdapter()"
+   },
+   {
+    "slot": 5,
+    "name": "IsUsingGraphics",
+    "sig": "virtual bool IsUsingGraphics()"
+   },
+   {
+    "slot": 6,
+    "name": "SpewDriverInfo",
+    "sig": "virtual void SpewDriverInfo()"
+   },
+   {
+    "slot": 7,
+    "name": "StencilBufferBits",
+    "sig": "virtual int StencilBufferBits()"
+   },
+   {
+    "slot": 8,
+    "name": "IsAAEnabled",
+    "sig": "virtual bool IsAAEnabled()"
+   },
+   {
+    "slot": 9,
+    "name": "Present",
+    "sig": "virtual void Present()"
+   },
+   {
+    "slot": 10,
+    "name": "GetWindowSize",
+    "sig": "virtual void GetWindowSize( int &nWidth, int &nHeight )"
+   },
+   {
+    "slot": 11,
+    "name": "SetHardwareGammaRamp",
+    "sig": "virtual void SetHardwareGammaRamp( float fGamma, float fGammaTVRangeMin, float fGammaTVRangeMax, float fGammaTVExponent, bool bTVEnabled )"
+   },
+   {
+    "slot": 12,
+    "name": "AddView",
+    "sig": "virtual bool AddView( void* hWnd )"
+   },
+   {
+    "slot": 13,
+    "name": "RemoveView",
+    "sig": "virtual void RemoveView( void* hWnd )"
+   },
+   {
+    "slot": 14,
+    "name": "SetView",
+    "sig": "virtual void SetView( void* hWnd )"
+   },
+   {
+    "slot": 15,
+    "name": "CompileShader",
+    "sig": "virtual IShaderBuffer* CompileShader( const char *pProgram, size_t nBufLen, const char *pShaderVersion )"
+   },
+   {
+    "slot": 16,
+    "name": "CreateVertexShader",
+    "sig": "virtual VertexShaderHandle_t CreateVertexShader( IShaderBuffer* pShaderBuffer )"
+   },
+   {
+    "slot": 17,
+    "name": "DestroyVertexShader",
+    "sig": "virtual void DestroyVertexShader( VertexShaderHandle_t hShader )"
+   },
+   {
+    "slot": 18,
+    "name": "CreateGeometryShader",
+    "sig": "virtual GeometryShaderHandle_t CreateGeometryShader( IShaderBuffer* pShaderBuffer )"
+   },
+   {
+    "slot": 19,
+    "name": "DestroyGeometryShader",
+    "sig": "virtual void DestroyGeometryShader( GeometryShaderHandle_t hShader )"
+   },
+   {
+    "slot": 20,
+    "name": "CreatePixelShader",
+    "sig": "virtual PixelShaderHandle_t CreatePixelShader( IShaderBuffer* pShaderBuffer )"
+   },
+   {
+    "slot": 21,
+    "name": "DestroyPixelShader",
+    "sig": "virtual void DestroyPixelShader( PixelShaderHandle_t hShader )"
+   },
+   {
+    "slot": 22,
+    "name": "CreateStaticMesh",
+    "sig": "virtual IMesh* CreateStaticMesh( VertexFormat_t vertexFormat, const char *pTextureBudgetGroup, IMaterial * pMaterial = NULL )"
+   },
+   {
+    "slot": 23,
+    "name": "DestroyStaticMesh",
+    "sig": "virtual void DestroyStaticMesh( IMesh* mesh )"
+   },
+   {
+    "slot": 24,
+    "name": "CreateVertexBuffer",
+    "sig": "virtual IVertexBuffer *CreateVertexBuffer( ShaderBufferType_t type, VertexFormat_t fmt, int nVertexCount, const char *pBudgetGroup )"
+   },
+   {
+    "slot": 25,
+    "name": "DestroyVertexBuffer",
+    "sig": "virtual void DestroyVertexBuffer( IVertexBuffer *pVertexBuffer )"
+   },
+   {
+    "slot": 26,
+    "name": "CreateIndexBuffer",
+    "sig": "virtual IIndexBuffer *CreateIndexBuffer( ShaderBufferType_t bufferType, MaterialIndexFormat_t fmt, int nIndexCount, const char *pBudgetGroup )"
+   },
+   {
+    "slot": 27,
+    "name": "DestroyIndexBuffer",
+    "sig": "virtual void DestroyIndexBuffer( IIndexBuffer *pIndexBuffer )"
+   },
+   {
+    "slot": 28,
+    "name": "GetDynamicVertexBuffer",
+    "sig": "virtual IVertexBuffer *GetDynamicVertexBuffer( int nStreamID, VertexFormat_t vertexFormat, bool bBuffered = true )"
+   },
+   {
+    "slot": 29,
+    "name": "GetDynamicIndexBuffer",
+    "sig": "virtual IIndexBuffer *GetDynamicIndexBuffer( MaterialIndexFormat_t fmt, bool bBuffered = true )"
+   },
+   {
+    "slot": 30,
+    "name": "EnableNonInteractiveMode",
+    "sig": "virtual void EnableNonInteractiveMode( MaterialNonInteractiveMode_t mode, ShaderNonInteractiveInfo_t *pInfo = NULL )"
+   },
+   {
+    "slot": 31,
+    "name": "RefreshFrontBufferNonInteractive",
+    "sig": "virtual void RefreshFrontBufferNonInteractive( )"
+   },
+   {
+    "slot": 32,
+    "name": "HandleThreadEvent",
+    "sig": "virtual void HandleThreadEvent( uint32 threadEvent )"
+   }
+  ]
+ },
+ "IShaderDeviceMgr": {
+  "note": "IAppSystem (9, GMod x64) + 10, verified.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "Connect",
+    "sig": "virtual bool Connect( CreateInterfaceFn factory )"
+   },
+   {
+    "slot": 1,
+    "name": "Disconnect",
+    "sig": "virtual void Disconnect()"
+   },
+   {
+    "slot": 2,
+    "name": "QueryInterface",
+    "sig": "virtual void *QueryInterface( const char *pInterfaceName )"
+   },
+   {
+    "slot": 3,
+    "name": "Init",
+    "sig": "virtual InitReturnVal_t Init()"
+   },
+   {
+    "slot": 4,
+    "name": "Shutdown",
+    "sig": "virtual void Shutdown()"
+   },
+   {
+    "slot": 5,
+    "name": "GetDependencies",
+    "sig": "virtual const AppSystemInfo_t* GetDependencies()"
+   },
+   {
+    "slot": 6,
+    "name": "GetTier",
+    "sig": "virtual AppSystemTier_t GetTier()"
+   },
+   {
+    "slot": 7,
+    "name": "Reconnect",
+    "sig": "virtual void Reconnect( CreateInterfaceFn factory, const char *pInterfaceName )"
+   },
+   {
+    "slot": 8,
+    "name": "IsSingleton",
+    "sig": "virtual bool IsSingleton()"
+   },
+   {
+    "slot": 9,
+    "name": "GetAdapterCount",
+    "sig": "virtual int GetAdapterCount()"
+   },
+   {
+    "slot": 10,
+    "name": "GetAdapterInfo",
+    "sig": "virtual void GetAdapterInfo( int nAdapter, MaterialAdapterInfo_t& info )"
+   },
+   {
+    "slot": 11,
+    "name": "GetRecommendedConfigurationInfo",
+    "sig": "virtual bool GetRecommendedConfigurationInfo( int nAdapter, int nDXLevel, KeyValues *pConfiguration )"
+   },
+   {
+    "slot": 12,
+    "name": "GetModeCount",
+    "sig": "virtual int GetModeCount( int nAdapter )"
+   },
+   {
+    "slot": 13,
+    "name": "GetModeInfo",
+    "sig": "virtual void GetModeInfo( ShaderDisplayMode_t* pInfo, int nAdapter, int nMode )"
+   },
+   {
+    "slot": 14,
+    "name": "GetCurrentModeInfo",
+    "sig": "virtual void GetCurrentModeInfo( ShaderDisplayMode_t* pInfo, int nAdapter )"
+   },
+   {
+    "slot": 15,
+    "name": "SetAdapter",
+    "sig": "virtual bool SetAdapter( int nAdapter, int nFlags )"
+   },
+   {
+    "slot": 16,
+    "name": "SetMode",
+    "sig": "virtual CreateInterfaceFn SetMode( void *hWnd, int nAdapter, const ShaderDeviceInfo_t& mode )"
+   },
+   {
+    "slot": 17,
+    "name": "AddModeChangeCallback",
+    "sig": "virtual void AddModeChangeCallback( ShaderModeChangeCallbackFunc_t func )"
+   },
+   {
+    "slot": 18,
+    "name": "RemoveModeChangeCallback",
+    "sig": "virtual void RemoveModeChangeCallback( ShaderModeChangeCallbackFunc_t func )"
+   }
+  ]
+ },
+ "IHardwareConfigInternal": {
+  "note": "74 slots: nillerusr header minus CanStretchRectFromTextures (inferred: the one missing slot near the end; others verified by stub return values).",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "HasDestAlphaBuffer",
+    "sig": "virtual bool HasDestAlphaBuffer()"
+   },
+   {
+    "slot": 1,
+    "name": "HasStencilBuffer",
+    "sig": "virtual bool HasStencilBuffer()"
+   },
+   {
+    "slot": 2,
+    "name": "GetFrameBufferColorDepth",
+    "sig": "virtual int GetFrameBufferColorDepth()"
+   },
+   {
+    "slot": 3,
+    "name": "GetSamplerCount",
+    "sig": "virtual int GetSamplerCount()"
+   },
+   {
+    "slot": 4,
+    "name": "HasSetDeviceGammaRamp",
+    "sig": "virtual bool HasSetDeviceGammaRamp()"
+   },
+   {
+    "slot": 5,
+    "name": "SupportsCompressedTextures",
+    "sig": "virtual bool SupportsCompressedTextures()"
+   },
+   {
+    "slot": 6,
+    "name": "SupportsCompressedVertices",
+    "sig": "virtual VertexCompressionType_t SupportsCompressedVertices()"
+   },
+   {
+    "slot": 7,
+    "name": "SupportsNormalMapCompression",
+    "sig": "virtual bool SupportsNormalMapCompression()"
+   },
+   {
+    "slot": 8,
+    "name": "SupportsVertexAndPixelShaders",
+    "sig": "virtual bool SupportsVertexAndPixelShaders()"
+   },
+   {
+    "slot": 9,
+    "name": "SupportsPixelShaders_1_4",
+    "sig": "virtual bool SupportsPixelShaders_1_4()"
+   },
+   {
+    "slot": 10,
+    "name": "SupportsStaticControlFlow",
+    "sig": "virtual bool SupportsStaticControlFlow()"
+   },
+   {
+    "slot": 11,
+    "name": "SupportsPixelShaders_2_0",
+    "sig": "virtual bool SupportsPixelShaders_2_0()"
+   },
+   {
+    "slot": 12,
+    "name": "SupportsVertexShaders_2_0",
+    "sig": "virtual bool SupportsVertexShaders_2_0()"
+   },
+   {
+    "slot": 13,
+    "name": "MaximumAnisotropicLevel",
+    "sig": "virtual int MaximumAnisotropicLevel()"
+   },
+   {
+    "slot": 14,
+    "name": "MaxTextureWidth",
+    "sig": "virtual int MaxTextureWidth()"
+   },
+   {
+    "slot": 15,
+    "name": "MaxTextureHeight",
+    "sig": "virtual int MaxTextureHeight()"
+   },
+   {
+    "slot": 16,
+    "name": "TextureMemorySize",
+    "sig": "virtual int TextureMemorySize()"
+   },
+   {
+    "slot": 17,
+    "name": "SupportsOverbright",
+    "sig": "virtual bool SupportsOverbright()"
+   },
+   {
+    "slot": 18,
+    "name": "SupportsCubeMaps",
+    "sig": "virtual bool SupportsCubeMaps()"
+   },
+   {
+    "slot": 19,
+    "name": "SupportsMipmappedCubemaps",
+    "sig": "virtual bool SupportsMipmappedCubemaps()"
+   },
+   {
+    "slot": 20,
+    "name": "SupportsNonPow2Textures",
+    "sig": "virtual bool SupportsNonPow2Textures()"
+   },
+   {
+    "slot": 21,
+    "name": "GetTextureStageCount",
+    "sig": "virtual int GetTextureStageCount()"
+   },
+   {
+    "slot": 22,
+    "name": "NumVertexShaderConstants",
+    "sig": "virtual int NumVertexShaderConstants()"
+   },
+   {
+    "slot": 23,
+    "name": "NumPixelShaderConstants",
+    "sig": "virtual int NumPixelShaderConstants()"
+   },
+   {
+    "slot": 24,
+    "name": "MaxNumLights",
+    "sig": "virtual int MaxNumLights()"
+   },
+   {
+    "slot": 25,
+    "name": "SupportsHardwareLighting",
+    "sig": "virtual bool SupportsHardwareLighting()"
+   },
+   {
+    "slot": 26,
+    "name": "MaxBlendMatrices",
+    "sig": "virtual int MaxBlendMatrices()"
+   },
+   {
+    "slot": 27,
+    "name": "MaxBlendMatrixIndices",
+    "sig": "virtual int MaxBlendMatrixIndices()"
+   },
+   {
+    "slot": 28,
+    "name": "MaxTextureAspectRatio",
+    "sig": "virtual int MaxTextureAspectRatio()"
+   },
+   {
+    "slot": 29,
+    "name": "MaxVertexShaderBlendMatrices",
+    "sig": "virtual int MaxVertexShaderBlendMatrices()"
+   },
+   {
+    "slot": 30,
+    "name": "MaxUserClipPlanes",
+    "sig": "virtual int MaxUserClipPlanes()"
+   },
+   {
+    "slot": 31,
+    "name": "UseFastClipping",
+    "sig": "virtual bool UseFastClipping()"
+   },
+   {
+    "slot": 32,
+    "name": "GetDXSupportLevel",
+    "sig": "virtual int GetDXSupportLevel()"
+   },
+   {
+    "slot": 33,
+    "name": "GetShaderDLLName",
+    "sig": "virtual const char *GetShaderDLLName()"
+   },
+   {
+    "slot": 34,
+    "name": "ReadPixelsFromFrontBuffer",
+    "sig": "virtual bool ReadPixelsFromFrontBuffer()"
+   },
+   {
+    "slot": 35,
+    "name": "PreferDynamicTextures",
+    "sig": "virtual bool PreferDynamicTextures()"
+   },
+   {
+    "slot": 36,
+    "name": "SupportsHDR",
+    "sig": "virtual bool SupportsHDR()"
+   },
+   {
+    "slot": 37,
+    "name": "HasProjectedBumpEnv",
+    "sig": "virtual bool HasProjectedBumpEnv()"
+   },
+   {
+    "slot": 38,
+    "name": "SupportsSpheremapping",
+    "sig": "virtual bool SupportsSpheremapping()"
+   },
+   {
+    "slot": 39,
+    "name": "NeedsAAClamp",
+    "sig": "virtual bool NeedsAAClamp()"
+   },
+   {
+    "slot": 40,
+    "name": "NeedsATICentroidHack",
+    "sig": "virtual bool NeedsATICentroidHack()"
+   },
+   {
+    "slot": 41,
+    "name": "SupportsColorOnSecondStream",
+    "sig": "virtual bool SupportsColorOnSecondStream()"
+   },
+   {
+    "slot": 42,
+    "name": "SupportsStaticPlusDynamicLighting",
+    "sig": "virtual bool SupportsStaticPlusDynamicLighting()"
+   },
+   {
+    "slot": 43,
+    "name": "PreferReducedFillrate",
+    "sig": "virtual bool PreferReducedFillrate()"
+   },
+   {
+    "slot": 44,
+    "name": "GetMaxDXSupportLevel",
+    "sig": "virtual int GetMaxDXSupportLevel()"
+   },
+   {
+    "slot": 45,
+    "name": "SpecifiesFogColorInLinearSpace",
+    "sig": "virtual bool SpecifiesFogColorInLinearSpace()"
+   },
+   {
+    "slot": 46,
+    "name": "SupportsSRGB",
+    "sig": "virtual bool SupportsSRGB()"
+   },
+   {
+    "slot": 47,
+    "name": "FakeSRGBWrite",
+    "sig": "virtual bool FakeSRGBWrite()"
+   },
+   {
+    "slot": 48,
+    "name": "CanDoSRGBReadFromRTs",
+    "sig": "virtual bool CanDoSRGBReadFromRTs()"
+   },
+   {
+    "slot": 49,
+    "name": "SupportsGLMixedSizeTargets",
+    "sig": "virtual bool SupportsGLMixedSizeTargets()"
+   },
+   {
+    "slot": 50,
+    "name": "IsAAEnabled",
+    "sig": "virtual bool IsAAEnabled()"
+   },
+   {
+    "slot": 51,
+    "name": "GetVertexTextureCount",
+    "sig": "virtual int GetVertexTextureCount()"
+   },
+   {
+    "slot": 52,
+    "name": "GetMaxVertexTextureDimension",
+    "sig": "virtual int GetMaxVertexTextureDimension()"
+   },
+   {
+    "slot": 53,
+    "name": "MaxTextureDepth",
+    "sig": "virtual int MaxTextureDepth()"
+   },
+   {
+    "slot": 54,
+    "name": "GetHDRType",
+    "sig": "virtual HDRType_t GetHDRType()"
+   },
+   {
+    "slot": 55,
+    "name": "GetHardwareHDRType",
+    "sig": "virtual HDRType_t GetHardwareHDRType()"
+   },
+   {
+    "slot": 56,
+    "name": "SupportsPixelShaders_2_b",
+    "sig": "virtual bool SupportsPixelShaders_2_b()"
+   },
+   {
+    "slot": 57,
+    "name": "SupportsStreamOffset",
+    "sig": "virtual bool SupportsStreamOffset()"
+   },
+   {
+    "slot": 58,
+    "name": "StencilBufferBits",
+    "sig": "virtual int StencilBufferBits()"
+   },
+   {
+    "slot": 59,
+    "name": "MaxViewports",
+    "sig": "virtual int MaxViewports()"
+   },
+   {
+    "slot": 60,
+    "name": "OverrideStreamOffsetSupport",
+    "sig": "virtual void OverrideStreamOffsetSupport( bool bOverrideEnabled, bool bEnableSupport )"
+   },
+   {
+    "slot": 61,
+    "name": "GetShadowFilterMode",
+    "sig": "virtual int GetShadowFilterMode()"
+   },
+   {
+    "slot": 62,
+    "name": "NeedsShaderSRGBConversion",
+    "sig": "virtual int NeedsShaderSRGBConversion()"
+   },
+   {
+    "slot": 63,
+    "name": "UsesSRGBCorrectBlending",
+    "sig": "virtual bool UsesSRGBCorrectBlending()"
+   },
+   {
+    "slot": 64,
+    "name": "SupportsShaderModel_3_0",
+    "sig": "virtual bool SupportsShaderModel_3_0()"
+   },
+   {
+    "slot": 65,
+    "name": "HasFastVertexTextures",
+    "sig": "virtual bool HasFastVertexTextures()"
+   },
+   {
+    "slot": 66,
+    "name": "MaxHWMorphBatchCount",
+    "sig": "virtual int MaxHWMorphBatchCount()"
+   },
+   {
+    "slot": 67,
+    "name": "ActuallySupportsPixelShaders_2_b",
+    "sig": "virtual bool ActuallySupportsPixelShaders_2_b()"
+   },
+   {
+    "slot": 68,
+    "name": "SupportsHDRMode",
+    "sig": "virtual bool SupportsHDRMode( HDRType_t nHDRMode )"
+   },
+   {
+    "slot": 69,
+    "name": "GetHDREnabled",
+    "sig": "virtual bool GetHDREnabled( void )"
+   },
+   {
+    "slot": 70,
+    "name": "SetHDREnabled",
+    "sig": "virtual void SetHDREnabled( bool bEnable )"
+   },
+   {
+    "slot": 71,
+    "name": "SupportsBorderColor",
+    "sig": "virtual bool SupportsBorderColor( void )"
+   },
+   {
+    "slot": 72,
+    "name": "SupportsFetch4",
+    "sig": "virtual bool SupportsFetch4( void )"
+   },
+   {
+    "slot": 73,
+    "name": "GetHWSpecificShaderDLLName",
+    "sig": "virtual const char *GetHWSpecificShaderDLLName()"
+   }
+  ]
+ },
+ "IDebugTextureInfo": {
+  "note": "6 slots.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "EnableDebugTextureList",
+    "sig": "virtual void EnableDebugTextureList( bool bEnable )"
+   },
+   {
+    "slot": 1,
+    "name": "EnableGetAllTextures",
+    "sig": "virtual void EnableGetAllTextures( bool bEnable )"
+   },
+   {
+    "slot": 2,
+    "name": "GetDebugTextureList",
+    "sig": "virtual KeyValues* GetDebugTextureList()"
+   },
+   {
+    "slot": 3,
+    "name": "GetTextureMemoryUsed",
+    "sig": "virtual int GetTextureMemoryUsed( TextureMemoryType eTextureMemory )"
+   },
+   {
+    "slot": 4,
+    "name": "IsDebugTextureListFresh",
+    "sig": "virtual bool IsDebugTextureListFresh( int numFramesAllowed = 1 )"
+   },
+   {
+    "slot": 5,
+    "name": "SetDebugTextureRendering",
+    "sig": "virtual bool SetDebugTextureRendering( bool bEnable )"
+   }
+  ]
+ },
+ "IMesh": {
+  "note": "Primary vtable of IMesh (IVertexBuffer + new IMesh methods) + one GMod slot returning this: 28.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "~IVertexBuffer",
+    "sig": "virtual ~IVertexBuffer()"
+   },
+   {
+    "slot": 1,
+    "name": "VertexCount",
+    "sig": "virtual int VertexCount()"
+   },
+   {
+    "slot": 2,
+    "name": "GetVertexFormat",
+    "sig": "virtual VertexFormat_t GetVertexFormat()"
+   },
+   {
+    "slot": 3,
+    "name": "IsDynamic",
+    "sig": "virtual bool IsDynamic()"
+   },
+   {
+    "slot": 4,
+    "name": "BeginCastBuffer",
+    "sig": "virtual void BeginCastBuffer( VertexFormat_t format )"
+   },
+   {
+    "slot": 5,
+    "name": "EndCastBuffer",
+    "sig": "virtual void EndCastBuffer()"
+   },
+   {
+    "slot": 6,
+    "name": "GetRoomRemaining",
+    "sig": "virtual int GetRoomRemaining()"
+   },
+   {
+    "slot": 7,
+    "name": "Lock",
+    "sig": "virtual bool Lock( int nVertexCount, bool bAppend, VertexDesc_t &desc )"
+   },
+   {
+    "slot": 8,
+    "name": "Unlock",
+    "sig": "virtual void Unlock( int nVertexCount, VertexDesc_t &desc )"
+   },
+   {
+    "slot": 9,
+    "name": "Spew",
+    "sig": "virtual void Spew( int nVertexCount, const VertexDesc_t &desc )"
+   },
+   {
+    "slot": 10,
+    "name": "ValidateData",
+    "sig": "virtual void ValidateData( int nVertexCount, const VertexDesc_t & desc )"
+   },
+   {
+    "slot": 11,
+    "name": "SetPrimitiveType",
+    "sig": "virtual void SetPrimitiveType( MaterialPrimitiveType_t type )"
+   },
+   {
+    "slot": 12,
+    "name": "Draw",
+    "sig": "virtual void Draw( CPrimList *pLists, int nLists )"
+   },
+   {
+    "slot": 13,
+    "name": "Draw",
+    "sig": "virtual void Draw( int nFirstIndex = -1, int nIndexCount = 0 )"
+   },
+   {
+    "slot": 14,
+    "name": "SetColorMesh",
+    "sig": "virtual void SetColorMesh( IMesh *pColorMesh, int nVertexOffset )"
+   },
+   {
+    "slot": 15,
+    "name": "CopyToMeshBuilder",
+    "sig": "virtual void CopyToMeshBuilder( int iStartVert, int nVerts, int iStartIndex, int nIndices, int indexOffset, CMeshBuilder &builder )"
+   },
+   {
+    "slot": 16,
+    "name": "Spew",
+    "sig": "virtual void Spew( int nVertexCount, int nIndexCount, const MeshDesc_t &desc )"
+   },
+   {
+    "slot": 17,
+    "name": "ValidateData",
+    "sig": "virtual void ValidateData( int nVertexCount, int nIndexCount, const MeshDesc_t &desc )"
+   },
+   {
+    "slot": 18,
+    "name": "LockMesh",
+    "sig": "virtual void LockMesh( int nVertexCount, int nIndexCount, MeshDesc_t &desc )"
+   },
+   {
+    "slot": 19,
+    "name": "ModifyBegin",
+    "sig": "virtual void ModifyBegin( int nFirstVertex, int nVertexCount, int nFirstIndex, int nIndexCount, MeshDesc_t& desc )"
+   },
+   {
+    "slot": 20,
+    "name": "ModifyEnd",
+    "sig": "virtual void ModifyEnd( MeshDesc_t& desc )"
+   },
+   {
+    "slot": 21,
+    "name": "UnlockMesh",
+    "sig": "virtual void UnlockMesh( int nVertexCount, int nIndexCount, MeshDesc_t &desc )"
+   },
+   {
+    "slot": 22,
+    "name": "ModifyBeginEx",
+    "sig": "virtual void ModifyBeginEx( bool bReadOnly, int nFirstVertex, int nVertexCount, int nFirstIndex, int nIndexCount, MeshDesc_t &desc )"
+   },
+   {
+    "slot": 23,
+    "name": "SetFlexMesh",
+    "sig": "virtual void SetFlexMesh( IMesh *pMesh, int nVertexOffset )"
+   },
+   {
+    "slot": 24,
+    "name": "DisableFlexMesh",
+    "sig": "virtual void DisableFlexMesh()"
+   },
+   {
+    "slot": 25,
+    "name": "MarkAsDrawn",
+    "sig": "virtual void MarkAsDrawn()"
+   },
+   {
+    "slot": 26,
+    "name": "ComputeMemoryUsed",
+    "sig": "virtual unsigned ComputeMemoryUsed()"
+   },
+   {
+    "slot": 27,
+    "name": "Unknown27",
+    "sig": "virtual void* Unknown27() /* returns this */"
+   }
+  ]
+ },
+ "IMesh@IIndexBuffer": {
+  "note": "Secondary vtable at +8: IIndexBuffer, 13.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "~IIndexBuffer",
+    "sig": "virtual ~IIndexBuffer()"
+   },
+   {
+    "slot": 1,
+    "name": "IndexCount",
+    "sig": "virtual int IndexCount()"
+   },
+   {
+    "slot": 2,
+    "name": "IndexFormat",
+    "sig": "virtual MaterialIndexFormat_t IndexFormat()"
+   },
+   {
+    "slot": 3,
+    "name": "IsDynamic",
+    "sig": "virtual bool IsDynamic()"
+   },
+   {
+    "slot": 4,
+    "name": "BeginCastBuffer",
+    "sig": "virtual void BeginCastBuffer( MaterialIndexFormat_t format )"
+   },
+   {
+    "slot": 5,
+    "name": "EndCastBuffer",
+    "sig": "virtual void EndCastBuffer()"
+   },
+   {
+    "slot": 6,
+    "name": "GetRoomRemaining",
+    "sig": "virtual int GetRoomRemaining()"
+   },
+   {
+    "slot": 7,
+    "name": "Lock",
+    "sig": "virtual bool Lock( int nMaxIndexCount, bool bAppend, IndexDesc_t &desc )"
+   },
+   {
+    "slot": 8,
+    "name": "Unlock",
+    "sig": "virtual void Unlock( int nWrittenIndexCount, IndexDesc_t &desc )"
+   },
+   {
+    "slot": 9,
+    "name": "ModifyBegin",
+    "sig": "virtual void ModifyBegin( bool bReadOnly, int nFirstIndex, int nIndexCount, IndexDesc_t& desc )"
+   },
+   {
+    "slot": 10,
+    "name": "ModifyEnd",
+    "sig": "virtual void ModifyEnd( IndexDesc_t& desc )"
+   },
+   {
+    "slot": 11,
+    "name": "Spew",
+    "sig": "virtual void Spew( int nIndexCount, const IndexDesc_t &desc )"
+   },
+   {
+    "slot": 12,
+    "name": "ValidateData",
+    "sig": "virtual void ValidateData( int nIndexCount, const IndexDesc_t &desc )"
+   }
+  ]
+ },
+ "IVertexBuffer": {
+  "note": "11.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "~IVertexBuffer",
+    "sig": "virtual ~IVertexBuffer()"
+   },
+   {
+    "slot": 1,
+    "name": "VertexCount",
+    "sig": "virtual int VertexCount()"
+   },
+   {
+    "slot": 2,
+    "name": "GetVertexFormat",
+    "sig": "virtual VertexFormat_t GetVertexFormat()"
+   },
+   {
+    "slot": 3,
+    "name": "IsDynamic",
+    "sig": "virtual bool IsDynamic()"
+   },
+   {
+    "slot": 4,
+    "name": "BeginCastBuffer",
+    "sig": "virtual void BeginCastBuffer( VertexFormat_t format )"
+   },
+   {
+    "slot": 5,
+    "name": "EndCastBuffer",
+    "sig": "virtual void EndCastBuffer()"
+   },
+   {
+    "slot": 6,
+    "name": "GetRoomRemaining",
+    "sig": "virtual int GetRoomRemaining()"
+   },
+   {
+    "slot": 7,
+    "name": "Lock",
+    "sig": "virtual bool Lock( int nVertexCount, bool bAppend, VertexDesc_t &desc )"
+   },
+   {
+    "slot": 8,
+    "name": "Unlock",
+    "sig": "virtual void Unlock( int nVertexCount, VertexDesc_t &desc )"
+   },
+   {
+    "slot": 9,
+    "name": "Spew",
+    "sig": "virtual void Spew( int nVertexCount, const VertexDesc_t &desc )"
+   },
+   {
+    "slot": 10,
+    "name": "ValidateData",
+    "sig": "virtual void ValidateData( int nVertexCount, const VertexDesc_t & desc )"
+   }
+  ]
+ },
+ "IIndexBuffer": {
+  "note": "13.",
+  "slots": [
+   {
+    "slot": 0,
+    "name": "~IIndexBuffer",
+    "sig": "virtual ~IIndexBuffer()"
+   },
+   {
+    "slot": 1,
+    "name": "IndexCount",
+    "sig": "virtual int IndexCount()"
+   },
+   {
+    "slot": 2,
+    "name": "IndexFormat",
+    "sig": "virtual MaterialIndexFormat_t IndexFormat()"
+   },
+   {
+    "slot": 3,
+    "name": "IsDynamic",
+    "sig": "virtual bool IsDynamic()"
+   },
+   {
+    "slot": 4,
+    "name": "BeginCastBuffer",
+    "sig": "virtual void BeginCastBuffer( MaterialIndexFormat_t format )"
+   },
+   {
+    "slot": 5,
+    "name": "EndCastBuffer",
+    "sig": "virtual void EndCastBuffer()"
+   },
+   {
+    "slot": 6,
+    "name": "GetRoomRemaining",
+    "sig": "virtual int GetRoomRemaining()"
+   },
+   {
+    "slot": 7,
+    "name": "Lock",
+    "sig": "virtual bool Lock( int nMaxIndexCount, bool bAppend, IndexDesc_t &desc )"
+   },
+   {
+    "slot": 8,
+    "name": "Unlock",
+    "sig": "virtual void Unlock( int nWrittenIndexCount, IndexDesc_t &desc )"
+   },
+   {
+    "slot": 9,
+    "name": "ModifyBegin",
+    "sig": "virtual void ModifyBegin( bool bReadOnly, int nFirstIndex, int nIndexCount, IndexDesc_t& desc )"
+   },
+   {
+    "slot": 10,
+    "name": "ModifyEnd",
+    "sig": "virtual void ModifyEnd( IndexDesc_t& desc )"
+   },
+   {
+    "slot": 11,
+    "name": "Spew",
+    "sig": "virtual void Spew( int nIndexCount, const IndexDesc_t &desc )"
+   },
+   {
+    "slot": 12,
+    "name": "ValidateData",
+    "sig": "virtual void ValidateData( int nIndexCount, const IndexDesc_t &desc )"
+   }
+  ]
+ }
+}

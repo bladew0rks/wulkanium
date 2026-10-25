@@ -1,0 +1,38 @@
+[package]
+name = "wulkanium"
+description = "Drop-in shaderapi DLL for Garry's Mod x64 rendering through wgpu / Vulkan (loaded with -shaderapi shaderapiwgpu)"
+version = "0.1.0"
+edition = "2024"
+license-file = "LICENSE.md"
+
+[lib]
+# The engine loads `-shaderapi <name>` as <name>.dll.
+name = "shaderapiwgpu"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
+raw-window-handle = "0.6"
+pollster = "1"
+parking_lot = "0.12"
+lock_api = "0.4"
+lzma-rs = "0.3"
+rustc-hash = "2"
+dlss_wgpu = { version = "6", optional = true, features = ["debug_overlay"] }
+uuid = { version = "1", optional = true }
+egui = { version = "0.37", default-features = false, features = ["default_fonts"] }
+egui-wgpu = { version = "0.37", default-features = false }
+bytemuck = { version = "1", features = ["derive"] }
+
+[features]
+# DLSS (needs DLSS_SDK, VULKAN_SDK and the MSVC target: cargo xwin build --features dlss --target x86_64-pc-windows-msvc).
+dlss = ["dep:dlss_wgpu", "dep:uuid"]
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_LibraryLoader"] }
+
+[profile.release]
+lto = "thin"
