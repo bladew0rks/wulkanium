@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.png" alt="wulkanium logo" width="160"></p>
+<p align="center"><img src="logo.png" alt="wulkanium logo" width="192"></p>
 
 <h1 align="center">wulkanium</h1>
 
