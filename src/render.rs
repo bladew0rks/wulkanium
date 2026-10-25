@@ -47,7 +47,71 @@ const PIPELINE_CACHE_FILE: &str = "shaderapiwgpu.pipelinecache";
 const MAX_QUERIES: u32 = 4096;
 
 /// run the recorded part of the frame without presenting (ReadPixels)
+/// work for the render thread, in order
+enum Job {
+    Present(Frame),
+    /// mid-frame flush; replies when done
+    Flush(Frame, std::sync::mpsc::Sender<()>),
+    /// replies once everything queued before it is done
+    Sync(std::sync::mpsc::Sender<()>),
+}
+
+/// the render thread's queue: one frame in flight, so the game runs at most a frame ahead
+static QUEUE: Mutex<Option<(std::sync::mpsc::SyncSender<Job>, std::thread::JoinHandle<()>)>> = Mutex::new(None);
+
+fn queue() -> Option<std::sync::mpsc::SyncSender<Job>> {
+    if SHUT_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    let mut q = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    if q.is_none() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(1);
+        let thread = std::thread::Builder::new()
+            .name("wulkanium render".into())
+            .spawn(move || {
+                for job in rx {
+                    match job {
+                        Job::Present(frame) => present_now(frame),
+                        Job::Flush(frame, done) => {
+                            flush_now(frame);
+                            let _ = done.send(());
+                        }
+                        Job::Sync(done) => {
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        *q = Some((tx, thread));
+    }
+    q.as_ref().map(|q| q.0.clone())
+}
+
+/// hand a finished frame to the render thread
+pub fn present(frame: Frame) {
+    if let Some(q) = queue() {
+        let _ = q.send(Job::Present(frame));
+    }
+}
+
+/// run the recorded part of a frame now and wait for it
 pub fn flush(frame: Frame) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if queue().is_some_and(|q| q.send(Job::Flush(frame, tx)).is_ok()) {
+        let _ = rx.recv();
+    }
+}
+
+/// wait until the render thread has done everything queued so far
+pub fn sync() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if queue().is_some_and(|q| q.send(Job::Sync(tx)).is_ok()) {
+        let _ = rx.recv();
+    }
+}
+
+fn flush_now(frame: Frame) {
     let mut g = RENDERER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(Ok(r)) = g.as_mut() {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.draw(frame, false))).is_err() {
@@ -58,6 +122,7 @@ pub fn flush(frame: Frame) {
 }
 
 pub fn read_target(id: i32, x: u32, y: u32, w: u32, h: u32) -> Option<Vec<u8>> {
+    sync();
     let g = RENDERER.lock().unwrap_or_else(|e| e.into_inner());
     let Some(Ok(r)) = g.as_ref() else { return None };
     let t = r.targets.get(&id)?;
@@ -95,6 +160,7 @@ pub fn read_target(id: i32, x: u32, y: u32, w: u32, h: u32) -> Option<Vec<u8>> {
 }
 
 pub fn wait_for_queries() {
+    sync();
     let g = RENDERER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(Ok(r)) = g.as_ref() {
         let _ = r.device.poll(wgpu::PollType::wait_indefinitely());
@@ -315,6 +381,11 @@ static SHUT_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// tear down while the window exists: a live vulkan device can keep the process from exiting
 pub fn shutdown() {
     SHUT_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    // closing the queue ends the render thread once it's done
+    if let Some((tx, thread)) = QUEUE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        drop(tx);
+        let _ = thread.join();
+    }
     let mut g = RENDERER.lock().unwrap_or_else(|e| e.into_inner());
     match g.take() {
         Some(Ok(mut r)) if !r.lost.load(std::sync::atomic::Ordering::SeqCst) => {
@@ -331,10 +402,7 @@ pub fn shutdown() {
     }
 }
 
-pub fn present(frame: Frame) {
-    if SHUT_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
+fn present_now(frame: Frame) {
     let mut g = RENDERER.lock().unwrap_or_else(|e| e.into_inner());
     // lost devices and panicked renderers get rebuilt
     let rebuild = match g.as_ref() {
@@ -879,7 +947,7 @@ impl Renderer {
             Full { id: i32, version: u64, faces: Vec<Vec<Option<Image>>>, signed: bool, volume: bool, desc: String },
             Partial { id: i32, version: u64, rects: Vec<(u32, u32, [u32; 4], Vec<u8>)> },
         }
-        let jobs: Vec<Job> = crate::api::with(|s| {
+        let jobs: Vec<Job> = crate::api::with_state(|s| {
             let mut bytes = 0usize;
             let mut seen = rustc_hash::FxHashSet::default();
             let mut jobs = Vec::new();
@@ -1454,9 +1522,9 @@ impl Renderer {
                 _ => {}
             }
         }
-        let src_sizes: HashMap<i32, (u32, u32)> = crate::api::with(|s| copy_srcs.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
-        let sizes: HashMap<i32, (u32, u32)> = crate::api::with(|s| ids.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
-        let depth_sizes: Vec<(i32, (u32, u32))> = crate::api::with(|s| depth_ids.iter().filter_map(|id| s.textures.get(id).filter(|t| crate::api::is_depth_format(t.format)).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
+        let src_sizes: HashMap<i32, (u32, u32)> = crate::api::with_state(|s| copy_srcs.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
+        let sizes: HashMap<i32, (u32, u32)> = crate::api::with_state(|s| ids.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
+        let depth_sizes: Vec<(i32, (u32, u32))> = crate::api::with_state(|s| depth_ids.iter().filter_map(|id| s.textures.get(id).filter(|t| crate::api::is_depth_format(t.format)).map(|t| (*id, (t.width.max(1) as u32, t.height.max(1) as u32)))).collect());
         for (id, size) in depth_sizes {
             if self.shadow_maps.get(&id).is_none_or(|m| m.size != size) {
                 let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1476,7 +1544,7 @@ impl Renderer {
             }
         }
         let (tex_uploads, tex_bytes) = self.sync_textures(&used);
-        let (states, aniso): (HashMap<i32, ([i32; 2], [i32; 3])>, i32) = crate::api::with(|s| (used.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.filter, t.wrap)))).collect(), s.anisotropy));
+        let (states, aniso): (HashMap<i32, ([i32; 2], [i32; 3])>, i32) = crate::api::with_state(|s| (used.iter().filter_map(|id| s.textures.get(id).map(|t| (*id, (t.filter, t.wrap)))).collect(), s.anisotropy));
         self.anisotropy = aniso;
         let t_sync = cpu_start.elapsed().as_secs_f32() * 1000.0;
         self.target(BACK, (w, h));
@@ -1781,6 +1849,20 @@ impl Renderer {
                     let (tw, th) = (t.size.0 as i32, t.size.1 as i32);
                     // a query left open only counts its pass
                     let mut active = false;
+                    // state already set in this pass, so unchanged state isn't re-sent
+                    #[derive(Default)]
+                    struct Cur<'a> {
+                        pipeline: Option<&'a wgpu::RenderPipeline>,
+                        consts: Option<(u32, u32)>,
+                        textures: Option<&'a wgpu::BindGroup>,
+                        stencil_ref: Option<u32>,
+                        viewport: Option<([i32; 4], u32, u32)>,
+                        scissor: Option<[u32; 4]>,
+                        vertex: Option<u64>,
+                        color: Option<(u64, u64)>,
+                        index: Option<u64>,
+                    }
+                    let mut cur = Cur::default();
                     for item in draws {
                         let (n, d) = match item {
                             Item::QueryBegin(slot) => {
@@ -1801,49 +1883,78 @@ impl Renderer {
                             Item::Draw(n, d) => (n, d),
                         };
                         let Some((pipeline, textures)) = &prepared[*n] else { continue };
-                        let (vb, ib) = match d.geometry {
-                            Geometry::Frame { vertex_offset } => (vbuf.slice(vertex_offset..), &ibuf),
-                            Geometry::StaticVertices { mesh } => match self.meshes.get(&mesh) {
-                                Some((vb, _)) => (vb.slice(..), &ibuf),
-                                None => continue,
-                            },
-                            Geometry::Static { mesh } => match self.meshes.get(&mesh) {
-                                Some((vb, ib)) => (vb.slice(..), ib),
-                                None => continue,
-                            },
+                        // frame vertices start at a multiple of their stride, so the frame buffer
+                        // stays bound and draws pass a base vertex
+                        let (vb_key, ib_key, base_vertex) = match d.geometry {
+                            Geometry::Frame { vertex_offset } => (0u64, 0u64, (vertex_offset / d.stride.max(1) as u64) as i32),
+                            Geometry::StaticVertices { mesh } => (mesh, 0, 0),
+                            Geometry::Static { mesh } => (mesh, mesh, 0),
                         };
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, &const_group, &[(d.vs_block as usize * VS_BLOCK) as u32, (d.ps_block as usize * PS_BLOCK) as u32]);
-                        pass.set_bind_group(1, textures, &[]);
-                        if d.key.stencil.is_some() {
+                        if vb_key != 0 && !self.meshes.contains_key(&vb_key) {
+                            continue;
+                        }
+                        if cur.pipeline != Some(pipeline) {
+                            pass.set_pipeline(pipeline);
+                            cur.pipeline = Some(pipeline);
+                        }
+                        let consts = (d.vs_block, d.ps_block);
+                        if cur.consts != Some(consts) {
+                            pass.set_bind_group(0, &const_group, &[(d.vs_block as usize * VS_BLOCK) as u32, (d.ps_block as usize * PS_BLOCK) as u32]);
+                            cur.consts = Some(consts);
+                        }
+                        if cur.textures != Some(textures) {
+                            pass.set_bind_group(1, textures, &[]);
+                            cur.textures = Some(textures);
+                        }
+                        if d.key.stencil.is_some() && cur.stencil_ref != Some(d.stencil_ref) {
                             pass.set_stencil_reference(d.stencil_ref);
+                            cur.stencil_ref = Some(d.stencil_ref);
                         }
                         let [vx, vy, vw, vh] = d.viewport;
                         let (x0, y0) = (vx.clamp(0, tw), vy.clamp(0, th));
                         let (x1, y1) = ((vx + vw).clamp(0, tw), (vy + vh).clamp(0, th));
-                        if vw > 0 && vh > 0 && x1 > x0 && y1 > y0 {
-                            pass.set_viewport(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32, d.depth[0], d.depth[1]);
-                        } else {
-                            pass.set_viewport(0.0, 0.0, tw as f32, th as f32, d.depth[0], d.depth[1]);
+                        let vp = if vw > 0 && vh > 0 && x1 > x0 && y1 > y0 { [x0, y0, x1 - x0, y1 - y0] } else { [0, 0, tw, th] };
+                        let vp_key = (vp, d.depth[0].to_bits(), d.depth[1].to_bits());
+                        if cur.viewport != Some(vp_key) {
+                            pass.set_viewport(vp[0] as f32, vp[1] as f32, vp[2] as f32, vp[3] as f32, d.depth[0], d.depth[1]);
+                            cur.viewport = Some(vp_key);
                         }
-                        match d.scissor {
+                        let sc = match d.scissor {
                             Some([l, t, r, b]) => {
                                 let (l, t) = (l.clamp(0, tw), t.clamp(0, th));
                                 let (r, b) = (r.clamp(l, tw), b.clamp(t, th));
-                                pass.set_scissor_rect(l as u32, t as u32, (r - l) as u32, (b - t) as u32);
+                                [l as u32, t as u32, (r - l) as u32, (b - t) as u32]
                             }
-                            None => pass.set_scissor_rect(0, 0, tw as u32, th as u32),
+                            None => [0, 0, tw as u32, th as u32],
+                        };
+                        if cur.scissor != Some(sc) {
+                            pass.set_scissor_rect(sc[0], sc[1], sc[2], sc[3]);
+                            cur.scissor = Some(sc);
                         }
-                        pass.set_vertex_buffer(0, vb);
+                        if cur.vertex != Some(vb_key) {
+                            if vb_key == 0 {
+                                pass.set_vertex_buffer(0, vbuf.slice(..));
+                            } else {
+                                pass.set_vertex_buffer(0, self.meshes[&vb_key].0.slice(..));
+                            }
+                            cur.vertex = Some(vb_key);
+                        }
                         if let Some(offset) = d.flex {
                             pass.set_vertex_buffer(2, vbuf.slice(offset..));
                         }
                         if let Some((mesh, offset, _, _)) = d.color {
-                            let Some((cb, _)) = self.meshes.get(&mesh) else { continue };
-                            pass.set_vertex_buffer(1, cb.slice(offset..));
+                            if cur.color != Some((mesh, offset)) {
+                                let Some((cb, _)) = self.meshes.get(&mesh) else { continue };
+                                pass.set_vertex_buffer(1, cb.slice(offset..));
+                                cur.color = Some((mesh, offset));
+                            }
                         }
-                        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(d.first_index..d.first_index + d.index_count, 0, 0..1);
+                        if cur.index != Some(ib_key) {
+                            let ib = if ib_key == 0 { &ibuf } else { &self.meshes[&ib_key].1 };
+                            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                            cur.index = Some(ib_key);
+                        }
+                        pass.draw_indexed(d.first_index..d.first_index + d.index_count, base_vertex, 0..1);
                     }
                     if active {
                         pass.end_occlusion_query();

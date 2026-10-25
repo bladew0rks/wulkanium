@@ -188,7 +188,7 @@ pub enum Cmd {
 
 /// uniform offsets must be 256-aligned
 pub const VS_BLOCK: usize = 4608;
-pub const PS_BLOCK: usize = 4096;
+pub const PS_BLOCK: usize = 1536;
 
 pub struct MeshUpload {
     pub id: u64,
@@ -350,6 +350,8 @@ pub struct State {
     pub ps_dirty: bool,
     last_extra: [[f32; 4]; 11],
     last_mip_bias: f32,
+    /// snapshots by id (they never change)
+    snap_cache: Vec<Option<std::sync::Arc<shadow::ShadowState>>>,
     /// cameras (view, view x proj) of this frame's / last frame's scene draws
     vp_cur: Vec<([f32; 16], [f32; 16])>,
     vp_prev: Vec<([f32; 16], [f32; 16])>,
@@ -369,6 +371,12 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let _shader = crate::lock::guard();
+    with_state(f)
+}
+
+/// state access without the shader mutex, for the render thread: the game thread can hold the
+/// mutex while it waits for that thread
+pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let s = g.get_or_insert_with(|| State {
         material: 0,
@@ -424,6 +432,7 @@ pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
         ps_dirty: true,
         last_extra: [[0.0; 4]; 11],
         last_mip_bias: 0.0,
+        snap_cache: Vec::new(),
         vp_cur: Default::default(),
         vp_prev: Default::default(),
         reproj_cache: None,
@@ -832,18 +841,12 @@ fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
 #[allow(clippy::too_many_arguments)]
 fn push_block(blocks: &mut Vec<u8>, last: &mut Option<u32>, consts: &[[f32; 4]], ints: &[[i32; 4]; 16], bools: [u32; 4], extra: &[[f32; 4]], size: usize) -> u32 {
     let start = blocks.len();
+    debug_assert!(consts.len() * 16 + 256 + 16 + extra.len() * 16 <= size);
     blocks.extend_from_slice(bytemuck::cast_slice(consts));
     blocks.extend_from_slice(bytemuck::cast_slice(ints));
     blocks.extend_from_slice(bytemuck::cast_slice(&bools));
     blocks.extend_from_slice(bytemuck::cast_slice(extra));
     blocks.resize(start + size, 0);
-    if let Some(l) = *last {
-        let l0 = l as usize * size;
-        if blocks[l0..l0 + size] == blocks[start..start + size] {
-            blocks.truncate(start);
-            return l;
-        }
-    }
     let idx = (start / size) as u32;
     *last = Some(idx);
     idx
@@ -882,7 +885,48 @@ fn record_draw(s: &mut State) {
     s.frame.record_ms += start.elapsed().as_secs_f32() * 1000.0;
 }
 
+/// record-path profile: ns per section, summed until the next periodic log line
+static PROF: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+const PROF_NAMES: [&str; 9] = ["snapshot", "debug", "flex", "vs consts", "ps consts", "vs extra", "blocks", "draw cmd", "geometry"];
+
+/// WULKANIUM_PROFILE=1: time the record path (the timers themselves cost ~20 ns each)
+fn profiling() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WULKANIUM_PROFILE").is_ok_and(|v| v != "0"))
+}
+
+struct Lap(Option<std::time::Instant>);
+impl Lap {
+    fn lap(&mut self, i: usize) {
+        if let Some(t) = self.0.as_mut() {
+            let now = std::time::Instant::now();
+            PROF[i].fetch_add((now - *t).as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            *t = now;
+        }
+    }
+}
+
+static PROF_DRAWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// "section ns/draw ..." since the last call, then reset
+fn take_profile() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = PROF_DRAWS.swap(0, Relaxed).max(1);
+    PROF_NAMES.iter().zip(&PROF).map(|(name, v)| format!("{name} {}", v.swap(0, Relaxed) / n)).collect::<Vec<_>>().join(", ")
+}
+
 fn record_draw_inner(s: &mut State) {
+    PROF_DRAWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut lap = Lap(profiling().then(std::time::Instant::now));
+    // whatever runs after the last lap counts as geometry
+    struct Tail(Option<std::time::Instant>);
+    impl Drop for Tail {
+        fn drop(&mut self) {
+            if let Some(t) = self.0 {
+                PROF[8].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let mesh = unsafe { &*(s.mesh as *const Mesh) };
     let md = mesh.r();
     let vsrc = md.vertex_override.map(|m| unsafe { &*m }).unwrap_or(mesh).r();
@@ -892,7 +936,18 @@ fn record_draw_inner(s: &mut State) {
         s.frame.skipped += 1;
         return;
     }
-    let Some(snap) = shadow::with(|sh| sh.get(s.snapshot).cloned()) else {
+    // snapshots never change, so keep them per id without the shadow lock
+    let id = s.snapshot.max(-1) as usize;
+    let cached = if s.snapshot >= 0 { s.snap_cache.get(id).cloned().flatten() } else { None };
+    let snap = cached.or_else(|| {
+        let a = shadow::with(|sh| sh.get(s.snapshot).cloned())?;
+        if s.snap_cache.len() <= id {
+            s.snap_cache.resize(id + 1, None);
+        }
+        s.snap_cache[id] = Some(a.clone());
+        Some(a)
+    });
+    let Some(snap) = snap else {
         why_skipped(s, "no snapshot");
         return;
     };
@@ -907,7 +962,9 @@ fn record_draw_inner(s: &mut State) {
         why_skipped(s, &format!("no vertices (stride {stride}, {} vertices, format {:#x})", vsrc.vertex_count, vsrc.format));
         return;
     }
+    lap.lap(0);
     debug_material(s, &snap, vsrc.format, md.color_mesh.is_some());
+    lap.lap(1);
     let skinned = s.num_bones > 0;
     // stream 2 + cFlexScale
     let flex = md.flex_mesh.and_then(|(fm, offset)| {
@@ -918,13 +975,17 @@ fn record_draw_inner(s: &mut State) {
         s.frame.vertices.extend_from_slice(src);
         Some(at)
     });
+    lap.lap(2);
     standard_vs_constants(s, skinned, flex.is_some());
+    lap.lap(3);
     standard_ps_constants(s, &snap);
+    lap.lap(4);
     let extra = vs_extra(s);
     if extra != s.last_extra {
         s.last_extra = extra;
         s.vs_dirty = true;
     }
+    lap.lap(5);
     let vs_block = match s.last_vs_block {
         Some(b) if !s.vs_dirty => b,
         _ => push_block(&mut s.frame.vs_blocks, &mut s.last_vs_block, &s.vs_constants, &s.vs_ints, [s.vs_bools, 0, 0, 0], &extra, VS_BLOCK),
@@ -938,9 +999,10 @@ fn record_draw_inner(s: &mut State) {
     }
     let ps_block = match s.last_ps_block {
         Some(b) if !s.ps_dirty => b,
-        _ => push_block(&mut s.frame.ps_blocks, &mut s.last_ps_block, &s.ps_constants, &s.ps_ints, [s.ps_bools, mip_bias.to_bits(), 0, 0], &[], PS_BLOCK),
+        _ => push_block(&mut s.frame.ps_blocks, &mut s.last_ps_block, &s.ps_constants[..crate::d3d2wgsl::PS_FLOAT_CONSTS], &s.ps_ints, [s.ps_bools, mip_bias.to_bits(), 0, 0], &[], PS_BLOCK),
     };
     s.ps_dirty = false;
+    lap.lap(6);
 
     // (-1, _) = whole mesh
     let (first, count) = if s.first_index < 0 || s.index_count <= 0 { (0usize, isrc.index_count) } else { (s.first_index as usize, s.index_count as usize) };
@@ -1018,6 +1080,8 @@ fn record_draw_inner(s: &mut State) {
         Some((id, (first * cstride) as u64, cstride as u32, e.offset))
     });
     let border = s.border_clamp;
+    lap.lap(7);
+    let _tail = Tail(profiling().then(std::time::Instant::now));
     let draw = |geometry, first_index: usize, index_count: usize, topology| {
         Cmd::Draw(Box::new(DrawCmd {
             geometry,
@@ -1089,7 +1153,10 @@ fn record_draw_inner(s: &mut State) {
         push_draw(s, c);
         return;
     }
-    // copy just the used vertex range, indices rebased
+    // copy just the used vertex range, indices rebased; start at a multiple of the stride so
+    // the renderer can draw it with a base vertex
+    let pad = (stride - s.frame.vertices.len() % stride) % stride;
+    s.frame.vertices.resize(s.frame.vertices.len() + pad, 0);
     let vertex_offset = s.frame.vertices.len() as u64;
     s.frame.vertices.extend_from_slice(&vsrc.vertices[min * stride..(max + 1) * stride]);
     let first_index = s.frame.indices.len();
@@ -1130,6 +1197,10 @@ fn ensure_uploaded(s: &mut State, mesh: &Mesh) {
 
 /// once per material
 fn debug_material(s: &State, snap: &shadow::ShadowState, format: VertexFormat, color_mesh: bool) {
+    static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FULL.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     static SEEN: Mutex<Option<rustc_hash::FxHashSet<(usize, [i32; 16])>>> = Mutex::new(None);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let seen = seen.get_or_insert_with(Default::default);
@@ -1139,7 +1210,11 @@ fn debug_material(s: &State, snap: &shadow::ShadowState, format: VertexFormat, c
             *b = s.bound_textures[i];
         }
     }
-    if seen.len() >= 600 || !seen.insert((s.material, bound)) || material_name(s.material).starts_with("engine/preload") {
+    if seen.len() >= 600 {
+        FULL.store(true, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    if !seen.insert((s.material, bound)) || material_name(s.material).starts_with("engine/preload") {
         return;
     }
     let bound: Vec<String> = (0..16)
@@ -1270,6 +1345,12 @@ pub fn present() {
         let n = s.draws.len();
         s.draws.clear();
         let mut frame = std::mem::take(&mut s.frame);
+        // start the next frame at this one's sizes, so its buffers don't regrow
+        s.frame.vertices.reserve(frame.vertices.len());
+        s.frame.indices.reserve(frame.indices.len());
+        s.frame.vs_blocks.reserve(frame.vs_blocks.len());
+        s.frame.ps_blocks.reserve(frame.ps_blocks.len());
+        s.frame.cmds.reserve(frame.cmds.len());
         frame.capture = s.frames == s.trace_from;
         // the counter was just advanced
         frame.jitter = crate::dlss::jitter(s.frames - 1);
@@ -1293,6 +1374,9 @@ pub fn present() {
             frame.skipped_no_shader,
             material_name(mat)
         ));
+        if profiling() {
+            log::line(&format!("record ns/draw: {}", take_profile()));
+        }
     }
     crate::render::present(frame);
 }
@@ -2053,12 +2137,19 @@ fn set_constants(reg: i32, v: *const f32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize * 4) };
     with(|s| {
-        if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
         let dst = if vertex { &mut s.vs_constants } else { &mut s.ps_constants };
+        let mut changed = false;
         for (i, c) in src.chunks_exact(4).enumerate() {
             if let Some(d) = dst.get_mut(reg as usize + i) {
-                d.copy_from_slice(c);
+                if d[..] != *c {
+                    d.copy_from_slice(c);
+                    changed = true;
+                }
             }
+        }
+        // only real changes start a new constant block
+        if changed {
+            if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
         }
     });
 }
@@ -2254,8 +2345,10 @@ unsafe extern "C" fn set_ambient_light_cube(_t: *mut c_void, cube: *const f32) {
 fn vs_ambient_cube() {
     with(|s| {
         let cube = s.ambient_cube;
-        s.vs_constants[21..27].copy_from_slice(&cube);
-        s.vs_dirty = true;
+        if s.vs_constants[21..27] != cube {
+            s.vs_constants[21..27].copy_from_slice(&cube);
+            s.vs_dirty = true;
+        }
     });
 }
 unsafe extern "C" fn set_vs_ambient_cube(_t: *mut c_void) {
@@ -2264,10 +2357,12 @@ unsafe extern "C" fn set_vs_ambient_cube(_t: *mut c_void) {
 fn ps_ambient_cube(reg: i32, black: bool) {
     with(|s| {
         let cube = if black { [[0.0; 4]; 6] } else { s.ambient_cube };
-        s.ps_dirty = true;
         for (i, c) in cube.iter().enumerate() {
             if let Some(d) = s.ps_constants.get_mut(reg as usize + i) {
-                *d = *c;
+                if d != c {
+                    *d = *c;
+                    s.ps_dirty = true;
+                }
             }
         }
     });
@@ -2278,8 +2373,10 @@ unsafe extern "C" fn set_ps_ambient_cube(_t: *mut c_void, reg: i32, black: bool)
 fn set_ps_reg(reg: i32, v: [f32; 4]) {
     with(|s| {
         if let Some(d) = s.ps_constants.get_mut(reg.max(0) as usize) {
-            *d = v;
-            s.ps_dirty = true;
+            if *d != v {
+                *d = v;
+                s.ps_dirty = true;
+            }
         }
     });
 }
@@ -2410,13 +2507,16 @@ fn set_bools(reg: i32, v: *const i32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize) };
     with(|s| {
-        if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
+        let before = if vertex { s.vs_bools } else { s.ps_bools };
         let bits = if vertex { &mut s.vs_bools } else { &mut s.ps_bools };
         for (i, &b) in src.iter().enumerate() {
             let r = reg as usize + i;
             if r < 32 {
                 if b != 0 { *bits |= 1 << r } else { *bits &= !(1 << r) }
             }
+        }
+        if *bits != before {
+            if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
         }
     });
 }
@@ -2432,12 +2532,18 @@ fn set_ints(reg: i32, v: *const i32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize * 4) };
     with(|s| {
-        if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
         let dst = if vertex { &mut s.vs_ints } else { &mut s.ps_ints };
+        let mut changed = false;
         for (i, c) in src.chunks_exact(4).enumerate() {
             if let Some(d) = dst.get_mut(reg as usize + i) {
-                d.copy_from_slice(c);
+                if d[..] != *c {
+                    d.copy_from_slice(c);
+                    changed = true;
+                }
             }
+        }
+        if changed {
+            if vertex { s.vs_dirty = true } else { s.ps_dirty = true }
         }
     });
 }

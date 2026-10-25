@@ -8,7 +8,8 @@ use std::fmt::Write;
 use crate::d3dbc::*;
 
 pub const VS_FLOAT_CONSTS: usize = 256;
-pub const PS_FLOAT_CONSTS: usize = 224;
+// ps 3.0 allows 224, but stock shaders read at most c42
+pub const PS_FLOAT_CONSTS: usize = 64;
 pub const VARYINGS: u32 = 12;
 
 // D3DDECLUSAGE
@@ -126,6 +127,8 @@ impl Gen<'_> {
                 }
                 None => match self.defs.get(&n) {
                     Some(v) => vec4_lit(*v),
+                    // past the uploaded block: reads as zero
+                    None if self.s.pixel && n as usize >= PS_FLOAT_CONSTS => "vec4f(0.0)".into(),
                     None => format!("{}.c[{n}]", self.consts()),
                 },
             },

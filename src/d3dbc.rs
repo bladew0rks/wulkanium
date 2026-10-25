@@ -222,6 +222,8 @@ mod tests {
         let mut regs: BTreeMap<(bool, u8), usize> = BTreeMap::new();
         let mut models: BTreeMap<(bool, u8, u8), usize> = BTreeMap::new();
         let mut dcl: BTreeMap<(bool, u8, u8, u8), usize> = BTreeMap::new();
+        let mut max_const: BTreeMap<bool, (u32, String)> = BTreeMap::new();
+        let mut rel_ps = 0;
         let mut n = 0;
         for e in std::fs::read_dir(dir).unwrap() {
             let path = e.unwrap().path();
@@ -243,6 +245,15 @@ mod tests {
                                 *ops.entry(*op).or_default() += 1;
                                 for r in dst.iter().map(|d| d.reg).chain(src.iter().map(|s| s.reg)) {
                                     *regs.entry((s.pixel, r.ty)).or_default() += 1;
+                                    if r.ty == REG_CONST {
+                                        let m = max_const.entry(s.pixel).or_insert((0, String::new()));
+                                        if r.num as u32 > m.0 {
+                                            *m = (r.num as u32, name.clone());
+                                        }
+                                    }
+                                }
+                                if s.pixel && src.iter().any(|x| x.rel.is_some()) {
+                                    rel_ps += 1;
                                 }
                             }
                             Inst::Dcl { usage, index, dst, .. } => *dcl.entry((s.pixel, dst.reg.ty, *usage, *index)).or_default() += 1,
@@ -252,6 +263,7 @@ mod tests {
                 }
             }
         }
+        println!("max const (pixel?): {max_const:?}, ps rel-addressed ops: {rel_ps}");
         println!("{n} shaders\nmodels {models:?}\nops {ops:?}\nregs {regs:?}\ndcl {dcl:?}");
     }
 }
