@@ -308,6 +308,81 @@ struct PipelineId {
     samples: u32,
 }
 
+/// a pipeline compiling, compiled or rejected. draws skip it until it's ready (pop-in instead of
+/// a hitch).
+enum PipeSlot {
+    Ready(Pipeline),
+    Pending(Arc<SamplerSig>, Arc<Mutex<Option<Option<wgpu::RenderPipeline>>>>),
+    Failed,
+}
+
+/// an owned pipeline description, compiled on a worker thread
+struct PipelineJob {
+    label: String,
+    layout: wgpu::PipelineLayout,
+    vs: wgpu::ShaderModule,
+    ps: wgpu::ShaderModule,
+    /// (stride, attributes) of streams 0..2
+    buffers: [Option<(u64, Vec<wgpu::VertexAttribute>)>; 3],
+    primitive: wgpu::PrimitiveState,
+    depth_stencil: wgpu::DepthStencilState,
+    multisample: wgpu::MultisampleState,
+    targets: [Option<wgpu::ColorTargetState>; 2],
+    cache: Option<wgpu::PipelineCache>,
+}
+
+impl PipelineJob {
+    fn create(self, device: &wgpu::Device) -> Option<wgpu::RenderPipeline> {
+        let buffers: Vec<Option<wgpu::VertexBufferLayout>> = self.buffers.iter().map(|b| b.as_ref().map(|(stride, attributes)| wgpu::VertexBufferLayout { array_stride: *stride, step_mode: wgpu::VertexStepMode::Vertex, attributes })).collect();
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&self.layout),
+            vertex: wgpu::VertexState { module: &self.vs, entry_point: Some("main"), compilation_options: Default::default(), buffers: &buffers },
+            primitive: self.primitive,
+            depth_stencil: Some(self.depth_stencil.clone()),
+            multisample: self.multisample,
+            fragment: Some(wgpu::FragmentState { module: &self.ps, entry_point: Some("main"), compilation_options: Default::default(), targets: &self.targets }),
+            multiview_mask: None,
+            cache: self.cache.as_ref(),
+        });
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            log::line(&format!("renderer: pipeline {} rejected: {e}", self.label));
+            return None;
+        }
+        Some(pipeline)
+    }
+}
+
+/// worker threads that compile pipelines (the driver compile takes 10-300 ms)
+struct Compiler {
+    tx: std::sync::mpsc::Sender<(PipelineJob, Arc<Mutex<Option<Option<wgpu::RenderPipeline>>>>)>,
+}
+
+impl Compiler {
+    fn new(device: &wgpu::Device) -> Compiler {
+        let (tx, rx) = std::sync::mpsc::channel::<(PipelineJob, Arc<Mutex<Option<Option<wgpu::RenderPipeline>>>>)>();
+        let rx = Arc::new(Mutex::new(rx));
+        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 4));
+        for i in 0..workers {
+            let (rx, device) = (rx.clone(), device.clone());
+            let _ = std::thread::Builder::new().name(format!("wulkanium pipelines {i}")).spawn(move || {
+                loop {
+                    let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                    let Ok((job, cell)) = job else { break };
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.create(&device))).unwrap_or(None);
+                    *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                }
+            });
+        }
+        Compiler { tx }
+    }
+
+    fn compile(&self, job: PipelineJob, cell: Arc<Mutex<Option<Option<wgpu::RenderPipeline>>>>) {
+        let _ = self.tx.send((job, cell));
+    }
+}
+
 struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     sig: Arc<SamplerSig>,
@@ -322,7 +397,9 @@ struct Renderer {
     shaders: ShaderStore,
     vs_modules: FxHashMap<(usize, u64, bool, bool, bool, bool), Option<Arc<VsModule>>>,
     ps_modules: FxHashMap<(usize, PsOptions, bool), Option<Arc<PsModule>>>,
-    pipelines: FxHashMap<PipelineId, Option<Pipeline>>,
+    pipelines: FxHashMap<PipelineId, PipeSlot>,
+    /// background pipeline compiles
+    compiler: Compiler,
     /// keyed by the snapshot's shader name pointer
     code: FxHashMap<(usize, i32, i32), Option<Bytecode>>,
     /// 0 = unavailable
@@ -742,6 +819,7 @@ impl Renderer {
             unsafe { device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor { label: Some("pipelines"), data: data.as_deref(), fallback: true }) }
         });
         let timestamps = has_timestamps.then(|| device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("frame time"), ty: wgpu::QueryType::Timestamp, count: 2 }));
+        let compiler = Compiler::new(&device);
         Ok(Renderer {
             #[cfg(feature = "dlss")]
             dlss,
@@ -763,6 +841,7 @@ impl Renderer {
             vs_modules: FxHashMap::default(),
             ps_modules: FxHashMap::default(),
             pipelines: FxHashMap::default(),
+            compiler,
             code: FxHashMap::default(),
             gpu_us: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             timestamps,
@@ -1220,16 +1299,40 @@ impl Renderer {
         let ps_code = if d.ps.name.is_empty() { None } else { Some(self.bytecode(&d.ps)?) };
         let id = PipelineId { vs: Arc::as_ptr(&vs_code) as usize, format: d.format, stride: d.stride, ps: ps_code.as_ref().map_or(0, |c| Arc::as_ptr(c) as usize), ps_opts: d.ps_opts, key: d.key, color: d.color.map(|c| (c.2, c.3)), clip: d.clip && self.clip_distances, flex: d.flex.is_some(), mv, samples };
         if !self.pipelines.contains_key(&id) {
-            let p = self.build_pipeline(d, &vs_code, ps_code.as_ref(), mv, samples);
-            if p.is_none() {
-                trace(|| format!("renderer: no pipeline for {}/{}+{} + {}/{}+{} (format {:#x})", d.vs.name, d.vs.static_index, d.vs.dynamic, d.ps.name, d.ps.static_index, d.ps.dynamic, d.format));
-            }
-            self.pipelines.insert(id.clone(), p);
+            let slot = match self.build_pipeline(d, &vs_code, ps_code.as_ref(), mv, samples) {
+                Some((job, sig)) => {
+                    let cell = Arc::new(Mutex::new(None));
+                    self.compiler.compile(job, cell.clone());
+                    PipeSlot::Pending(sig, cell)
+                }
+                None => {
+                    trace(|| format!("renderer: no pipeline for {}/{}+{} + {}/{}+{} (format {:#x})", d.vs.name, d.vs.static_index, d.vs.dynamic, d.ps.name, d.ps.static_index, d.ps.dynamic, d.format));
+                    PipeSlot::Failed
+                }
+            };
+            self.pipelines.insert(id.clone(), slot);
         }
-        self.pipelines.get(&id)?.as_ref()
+        let slot = self.pipelines.get_mut(&id)?;
+        if let PipeSlot::Pending(sig, cell) = slot {
+            let done = cell.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(result) = done {
+                *slot = match result {
+                    Some(pipeline) => {
+                        self.unsaved_pipelines += 1;
+                        PipeSlot::Ready(Pipeline { pipeline, sig: sig.clone() })
+                    }
+                    None => PipeSlot::Failed,
+                };
+            }
+        }
+        match slot {
+            PipeSlot::Ready(p) => Some(p),
+            _ => None,
+        }
     }
 
-    fn build_pipeline(&mut self, d: &DrawCmd, vs_code: &Bytecode, ps_code: Option<&Bytecode>, mv: bool, samples: u32) -> Option<Pipeline> {
+    /// everything up to the driver compile, which runs on a worker (see `PipelineJob`)
+    fn build_pipeline(&mut self, d: &DrawCmd, vs_code: &Bytecode, ps_code: Option<&Bytecode>, mv: bool, samples: u32) -> Option<(PipelineJob, Arc<SamplerSig>)> {
         let clip = d.clip && self.clip_distances;
         let vs = self.vs_module(vs_code, d.format, d.color.is_some(), clip, d.flex.is_some(), mv, &format!("{}/{}+{}", d.vs.name, d.vs.static_index, d.vs.dynamic))?;
         // a2c replaces the alpha test, like the driver does for d3d9's atoc
@@ -1289,20 +1392,16 @@ impl Renderer {
         }
         let format = self.config.format;
         let layout = self.tex_layout(&sig).1.clone();
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &vs.module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    Some(wgpu::VertexBufferLayout { array_stride: d.stride as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attributes }),
-                    d.color.map(|c| wgpu::VertexBufferLayout { array_stride: c.2 as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &color_attr }),
-                    d.flex.map(|_| wgpu::VertexBufferLayout { array_stride: 28, step_mode: wgpu::VertexStepMode::Vertex, attributes: &flex_attr }),
-                ],
-            },
+        let job = PipelineJob {
+            label: format!("{}/{}+{} + {}/{}+{}", d.vs.name, d.vs.static_index, d.vs.dynamic, d.ps.name, d.ps.static_index, d.ps.dynamic),
+            layout,
+            vs: vs.module.clone(),
+            ps: ps.module.clone(),
+            buffers: [
+                Some((d.stride as u64, attributes)),
+                d.color.map(|c| (c.2 as u64, color_attr)),
+                d.flex.map(|_| (28, flex_attr)),
+            ],
             primitive: wgpu::PrimitiveState {
                 topology: match k.topology {
                     0 => wgpu::PrimitiveTopology::PointList,
@@ -1322,7 +1421,7 @@ impl Renderer {
                 },
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
+            depth_stencil: wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(k.depth_write && k.depth_test),
                 depth_compare: Some(if k.depth_test { depth_func(k.depth_func) } else { wgpu::CompareFunction::Always }),
@@ -1340,27 +1439,16 @@ impl Renderer {
                     2 => wgpu::DepthBiasState { constant: (f32::from_bits(k.shadow_bias.1) as f64 * 16777216.0).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32, slope_scale: f32::from_bits(k.shadow_bias.0), clamp: 0.0 },
                     _ => Default::default(),
                 },
-            }),
+            },
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: a2c },
-            fragment: Some(wgpu::FragmentState {
-                module: &ps.module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                // blended draws keep the motion vectors behind them
-                targets: &[
-                    Some(wgpu::ColorTargetState { format, blend, write_mask }),
-                    mv.then_some(wgpu::ColorTargetState { format: crate::dlss::MV_FORMAT, blend: None, write_mask: if blend.is_some() { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL } }),
-                ],
-            }),
-            multiview_mask: None,
-            cache: self.pipeline_cache.as_ref(),
-        });
-        self.unsaved_pipelines += 1;
-        if let Some(e) = pollster::block_on(scope.pop()) {
-            log::line(&format!("renderer: pipeline {}/{}+{} + {}/{}+{} rejected: {e}", d.vs.name, d.vs.static_index, d.vs.dynamic, d.ps.name, d.ps.static_index, d.ps.dynamic));
-            return None;
-        }
-        Some(Pipeline { pipeline, sig })
+            // blended draws keep the motion vectors behind them
+            targets: [
+                Some(wgpu::ColorTargetState { format, blend, write_mask }),
+                mv.then_some(wgpu::ColorTargetState { format: crate::dlss::MV_FORMAT, blend: None, write_mask: if blend.is_some() { wgpu::ColorWrites::empty() } else { wgpu::ColorWrites::ALL } }),
+            ],
+            cache: self.pipeline_cache.clone(),
+        };
+        Some((job, sig))
     }
 
     /// cached by texture ids, versions and sampler states
@@ -1582,7 +1670,8 @@ impl Renderer {
         }
         let vbuf = self.buffer("vertices", &frame.vertices, 0, wgpu::BufferUsages::VERTEX);
         let ibuf = self.buffer("indices", bytemuck::cast_slice(&frame.indices), 0, wgpu::BufferUsages::INDEX);
-        let vs_consts = self.buffer("vs constants", &frame.vs_blocks, VS_BLOCK, wgpu::BufferUsages::UNIFORM);
+        // padded so a full-size binding at the last (short) block stays in bounds
+        let vs_consts = self.buffer("vs constants", &frame.vs_blocks, frame.vs_blocks.len() + VS_BLOCK, wgpu::BufferUsages::UNIFORM);
         let ps_consts = self.buffer("ps constants", &frame.ps_blocks, PS_BLOCK, wgpu::BufferUsages::UNIFORM);
         let const_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
@@ -1899,7 +1988,7 @@ impl Renderer {
                         }
                         let consts = (d.vs_block, d.ps_block);
                         if cur.consts != Some(consts) {
-                            pass.set_bind_group(0, &const_group, &[(d.vs_block as usize * VS_BLOCK) as u32, (d.ps_block as usize * PS_BLOCK) as u32]);
+                            pass.set_bind_group(0, &const_group, &[d.vs_block * 256, (d.ps_block as usize * PS_BLOCK) as u32]);
                             cur.consts = Some(consts);
                         }
                         if cur.textures != Some(textures) {
@@ -2110,7 +2199,8 @@ impl Renderer {
             gpu_ms: self.gpu_us.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0,
             vertex_bytes: frame.vertices.len(),
             indices: frame.indices.len(),
-            vs_blocks: frame.vs_blocks.len() / VS_BLOCK,
+            vs_blocks: frame.vs_block_count,
+            const_bytes: frame.vs_blocks.len() + frame.ps_blocks.len(),
             ps_blocks: frame.ps_blocks.len() / PS_BLOCK,
             copies: rects.len(),
             mesh_uploads: frame.uploads.len(),

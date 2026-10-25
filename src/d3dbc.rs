@@ -224,6 +224,7 @@ mod tests {
         let mut dcl: BTreeMap<(bool, u8, u8, u8), usize> = BTreeMap::new();
         let mut max_const: BTreeMap<bool, (u32, String)> = BTreeMap::new();
         let mut rel_ps = 0;
+        let mut vs_high: BTreeMap<String, u32> = BTreeMap::new();
         let mut n = 0;
         for e in std::fs::read_dir(dir).unwrap() {
             let path = e.unwrap().path();
@@ -255,6 +256,11 @@ mod tests {
                                 if s.pixel && src.iter().any(|x| x.rel.is_some()) {
                                     rel_ps += 1;
                                 }
+                                if !s.pixel {
+                                    for x in src.iter().filter(|x| x.reg.ty == REG_CONST && x.rel.is_none() && x.reg.num > 60) {
+                                        vs_high.entry(name.clone()).or_insert(x.reg.num as u32);
+                                    }
+                                }
                             }
                             Inst::Dcl { usage, index, dst, .. } => *dcl.entry((s.pixel, dst.reg.ty, *usage, *index)).or_default() += 1,
                             _ => {}
@@ -264,6 +270,7 @@ mod tests {
             }
         }
         println!("max const (pixel?): {max_const:?}, ps rel-addressed ops: {rel_ps}");
+        println!("vs reading c61+ directly: {vs_high:?}");
         println!("{n} shaders\nmodels {models:?}\nops {ops:?}\nregs {regs:?}\ndcl {dcl:?}");
     }
 }

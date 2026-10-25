@@ -147,7 +147,7 @@ pub struct DrawCmd {
     pub vs: ShaderRef,
     pub ps: ShaderRef,
     pub ps_opts: crate::d3d2wgsl::PsOptions,
-    /// indices into `Frame::vs_blocks` / `ps_blocks`
+    /// vs block offset in 256-byte units, ps block index
     pub vs_block: u32,
     pub ps_block: u32,
     /// 0 = none; vertex texture samplers in 16..20
@@ -172,6 +172,7 @@ pub struct DrawCmd {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Cmd {
     /// render target 0 (-1 = back buffer) and its depth (-1 = own, else a shadow map)
     Target { color: i32, depth: i32 },
@@ -180,7 +181,7 @@ pub enum Cmd {
     /// copy a texture into the current target
     CopyIn { src: i32, src_rect: Option<[i32; 4]>, dst_rect: Option<[i32; 4]> },
     Clear { color: Option<[u8; 4]>, depth: bool, stencil: Option<u8> },
-    Draw(Box<DrawCmd>),
+    Draw(DrawCmd),
     /// (query handle, issue number)
     QueryBegin { id: u64, issue: u64 },
     QueryEnd { id: u64 },
@@ -234,6 +235,7 @@ pub struct Frame {
     /// consecutive duplicates are shared
     pub vs_blocks: Vec<u8>,
     pub ps_blocks: Vec<u8>,
+    pub vs_block_count: usize,
 }
 
 /// dynamic overrides of the snapshot state, incl. gmod's render.OverrideBlend / PushFilter*
@@ -362,6 +364,10 @@ pub struct State {
     pub lighting_origin: [f32; 3],
     /// for sharing identical blocks
     last_vs_block: Option<u32>,
+    /// registers the last vs block holds
+    last_vs_regs: usize,
+    /// highest vs register the engine wrote directly (sizes every block)
+    vs_high: usize,
     last_ps_block: Option<u32>,
 }
 
@@ -441,6 +447,8 @@ pub fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
         stencil: Stencil { enable: false, func: 8, fail: 1, zfail: 1, pass: 1, reference: 0, test_mask: 0xffff_ffff, write_mask: 0xffff_ffff },
         lighting_origin: [0.0; 3],
         last_vs_block: None,
+        last_vs_regs: 0,
+        vs_high: 0,
         last_ps_block: None,
     });
     f(s)
@@ -659,10 +667,29 @@ fn standard_vs_constants(s: &mut State, skinned: bool, flex: bool) {
 }
 
 /// spot, point, directional
-fn sorted_lights(s: &State) -> Vec<Light> {
-    let mut v: Vec<Light> = s.lights.iter().flatten().copied().collect();
-    v.sort_by_key(|l| l.kind);
+fn sorted_lights(s: &State) -> Lights {
+    let mut v = Lights { list: [None; 4], len: 0 };
+    for l in s.lights.iter().flatten() {
+        v.list[v.len] = Some(*l);
+        v.len += 1;
+    }
+    v.list[..v.len].sort_by_key(|l| l.map(|l| l.kind));
     v
+}
+
+/// up to four lights without allocating
+struct Lights {
+    list: [Option<Light>; 4],
+    len: usize,
+}
+
+impl Lights {
+    fn iter(&self) -> impl Iterator<Item = &Light> {
+        self.list[..self.len].iter().flatten()
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
 }
 
 /// 2.2 curve dx9 uses for fog colors
@@ -838,6 +865,22 @@ fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
 }
 
 /// shares the previous block when equal
+/// vs block: ints, bools, the extra tail, then `regs` float registers, padded to 256 bytes.
+/// returns its offset in 256-byte units.
+fn push_vs_block(s: &mut State, extra: &[[f32; 4]; 11], regs: usize) -> u32 {
+    let b = &mut s.frame.vs_blocks;
+    let start = b.len();
+    b.extend_from_slice(bytemuck::cast_slice(&s.vs_ints));
+    b.extend_from_slice(bytemuck::cast_slice(&[s.vs_bools, 0, 0, 0]));
+    b.extend_from_slice(bytemuck::cast_slice(extra));
+    b.extend_from_slice(bytemuck::cast_slice(&s.vs_constants[..regs]));
+    b.resize(b.len().next_multiple_of(256), 0);
+    s.frame.vs_block_count += 1;
+    s.last_vs_block = Some((start / 256) as u32);
+    s.last_vs_regs = regs;
+    (start / 256) as u32
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_block(blocks: &mut Vec<u8>, last: &mut Option<u32>, consts: &[[f32; 4]], ints: &[[i32; 4]; 16], bools: [u32; 4], extra: &[[f32; 4]], size: usize) -> u32 {
     let start = blocks.len();
@@ -986,9 +1029,11 @@ fn record_draw_inner(s: &mut State) {
         s.vs_dirty = true;
     }
     lap.lap(5);
+    // unskinned shaders read up to the model matrix (c58..c60), skinned ones the bones after it
+    let regs = if skinned { 58 + 3 * s.bones.len().max(1) } else { 61 }.max(s.vs_high + 1).min(s.vs_constants.len());
     let vs_block = match s.last_vs_block {
-        Some(b) if !s.vs_dirty => b,
-        _ => push_block(&mut s.frame.vs_blocks, &mut s.last_vs_block, &s.vs_constants, &s.vs_ints, [s.vs_bools, 0, 0, 0], &extra, VS_BLOCK),
+        Some(b) if !s.vs_dirty && regs <= s.last_vs_regs => b,
+        _ => push_vs_block(s, &extra, regs),
     };
     s.vs_dirty = false;
     // -1 for the scene under dlss (guide 3.5)
@@ -1083,7 +1128,7 @@ fn record_draw_inner(s: &mut State) {
     lap.lap(7);
     let _tail = Tail(profiling().then(std::time::Instant::now));
     let draw = |geometry, first_index: usize, index_count: usize, topology| {
-        Cmd::Draw(Box::new(DrawCmd {
+        Cmd::Draw(DrawCmd {
             geometry,
             first_index: first_index as u32,
             index_count: index_count as u32,
@@ -1106,7 +1151,7 @@ fn record_draw_inner(s: &mut State) {
             scene,
             flex,
             color,
-        }))
+        })
     };
 
     // static meshes upload once per version
@@ -1368,7 +1413,7 @@ pub fn present() {
         log::line(&format!(
             "frame {frame_no}: {draws} draw passes ({drawn} recorded, {} vertex bytes, {} vs / {} ps constant blocks, {} skipped, {} without shaders), last material {}",
             frame.vertices.len(),
-            frame.vs_blocks.len() / VS_BLOCK,
+            frame.vs_block_count,
             frame.ps_blocks.len() / PS_BLOCK,
             frame.skipped,
             frame.skipped_no_shader,
@@ -2137,6 +2182,9 @@ fn set_constants(reg: i32, v: *const f32, n: i32, vertex: bool) {
     }
     let src = unsafe { std::slice::from_raw_parts(v, n as usize * 4) };
     with(|s| {
+        if vertex {
+            s.vs_high = s.vs_high.max(reg as usize + n as usize - 1);
+        }
         let dst = if vertex { &mut s.vs_constants } else { &mut s.ps_constants };
         let mut changed = false;
         for (i, c) in src.chunks_exact(4).enumerate() {

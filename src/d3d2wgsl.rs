@@ -493,8 +493,11 @@ fn pow9(a: f32, b: f32) -> f32 { return exp2(m9(vec4f(b), vec4f(log2(abs(a)))).x
 fn consts_struct(name: &str, floats: usize) -> String {
     // hp: 1 / viewport size, then dlss jitter in ndc. clip: user clip planes. mvm: reprojection to
     // last frame's clip space.
-    let tail = if name == "V" { "    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n" } else { "" };
-    format!("struct {name}Consts {{\n    c: array<vec4f, {floats}>,\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n{tail}}}\n")
+    if name == "V" {
+        // vs blocks end after the registers a draw needs, so the float array comes last
+        return format!("struct VConsts {{\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n    c: array<vec4f, {floats}>,\n}}\n");
+    }
+    format!("struct {name}Consts {{\n    c: array<vec4f, {floats}>,\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n}}\n")
 }
 
 /// elements missing from the vertex data read as (0, 0, 0, 1). `mv` also outputs this and last
