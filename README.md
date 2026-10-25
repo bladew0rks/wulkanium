@@ -1,6 +1,6 @@
-<h1 align="center">
-  <img src="logo.png" alt="" height="48" align="center"> wulkanium <img src="logo.png" alt="" height="48" align="center">
-</h1>
+<p align="center"><img src="logo.png" alt="wulkanium logo" width="160"></p>
+
+<h1 align="center">wulkanium</h1>
 
 <p align="center">Drop-in Vulkan renderer for Garry's Mod, built on wgpu.</p>
 
