@@ -71,30 +71,45 @@ impl ConVar {
     }
 }
 
-/// convars by name, looked up again (at most once a second) while missing, since lua creates
-/// them later than we first ask
+/// convars by name. lua's convars are recreated on map changes, so a cached pointer is looked up
+/// again every quarter second (and checked by name on every read); missing ones once a second
 #[derive(Default)]
 pub struct Cache {
-    found: HashMap<String, ConVar>,
+    found: HashMap<String, (ConVar, std::time::Instant)>,
     missing: HashMap<String, std::time::Instant>,
+}
+
+impl ConVar {
+    /// still a convar called `name` (a freed one usually isn't)
+    fn named(self, name: &str) -> bool {
+        unsafe {
+            let n = *((self.0 + NAME) as *const *const c_char);
+            !n.is_null() && CStr::from_ptr(n).to_bytes().eq_ignore_ascii_case(name.as_bytes())
+        }
+    }
 }
 
 impl Cache {
     pub fn get(&mut self, name: &str) -> Option<ConVar> {
-        if let Some(c) = self.found.get(name) {
-            return Some(*c);
-        }
-        if self.missing.get(name).is_some_and(|t| t.elapsed().as_secs() < 1) {
+        let old = self.found.get(name).copied();
+        if let Some((c, at)) = old {
+            if at.elapsed().as_millis() < 250 && c.named(name) {
+                return Some(c);
+            }
+        } else if self.missing.get(name).is_some_and(|t| t.elapsed().as_secs() < 1) {
             return None;
         }
         match find(name) {
             Some(c) => {
-                crate::log::line(&format!("convar {name} = {} / {}", c.int(), c.float()));
+                if old.is_none_or(|o| o.0 != c) {
+                    crate::log::line(&format!("convar {name} at {:#x} = {} / {}", c.0, c.int(), c.float()));
+                }
                 self.missing.remove(name);
-                self.found.insert(name.to_string(), c);
+                self.found.insert(name.to_string(), (c, std::time::Instant::now()));
                 Some(c)
             }
             None => {
+                self.found.remove(name);
                 self.missing.insert(name.to_string(), std::time::Instant::now());
                 None
             }

@@ -413,6 +413,9 @@ struct Renderer {
     compiler: Compiler,
     /// keyed by the snapshot's shader name pointer
     code: FxHashMap<(crate::shadow::ShaderName, i32, i32), Option<Bytecode>>,
+    /// replaced handles of material shader files, only kept alive (see `bytecode`)
+    #[allow(dead_code)]
+    retired_code: Vec<Bytecode>,
     /// 0 = unavailable
     gpu_us: Arc<std::sync::atomic::AtomicU32>,
     timestamps: Option<wgpu::QuerySet>,
@@ -630,6 +633,7 @@ impl Renderer {
         .map_err(|e| e.to_string())?;
         let info = adapter.get_info();
         log::line(&format!("renderer: adapter {:?} ({:?})", info.name, info.backend));
+        let _ = crate::gameui::BACKEND.set(format!("{:?}", info.backend));
         let bc = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let lines = adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE);
         let mut features = wgpu::Features::empty();
@@ -859,6 +863,7 @@ impl Renderer {
             pipelines: FxHashMap::default(),
             compiler,
             code: FxHashMap::default(),
+            retired_code: Vec::new(),
             gpu_us: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             timestamps,
             pipeline_cache,
@@ -1164,7 +1169,13 @@ impl Renderer {
         }
         let elements = vertex_elements(format);
         let present = |usage: u8, index: u8| (color_stream && usage == 10 && index == 1) || (flex && index == 1 && (usage == 0 || usage == 3)) || elements.iter().any(|e| e.usage == usage && e.index == index);
-        let translated = if name.starts_with(crate::builtin::PREFIX) { crate::builtin::translate_vs(name, &present, clip, mv) } else { crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_vs(&s, &present, clip, mv)) };
+        // compressed vertices: packed normals / weights, unless a separate stream replaces them
+        let packed = |usage: u8, index: u8| match elements.iter().find(|e| e.usage == usage && e.index == index).map(|e| e.ty) {
+            Some(ElementType::UByte4) if !(flex && index == 1) => d3d2wgsl::Packed::UByte4,
+            Some(ElementType::Short2) => d3d2wgsl::Packed::Short2,
+            _ => d3d2wgsl::Packed::No,
+        };
+        let translated = if name.starts_with(crate::builtin::PREFIX) { crate::builtin::translate_vs(name, &present, &packed, clip, mv) } else { crate::d3dbc::parse(code).and_then(|s| d3d2wgsl::translate_vs(&s, &present, &packed, clip, mv)) };
         let m = match translated {
             Ok(t) => self.module(name, &t.wgsl).map(|module| Arc::new(VsModule { module, inputs: t.inputs, samplers: t.samplers })),
             Err(e) => {
@@ -1306,12 +1317,21 @@ impl Renderer {
 
     fn bytecode(&mut self, r: &crate::api::ShaderRef) -> Option<Bytecode> {
         let key = (r.name, r.static_index, r.dynamic);
-        if let Some(c) = self.code.get(&key) {
-            return c.clone();
-        }
         let name = r.name.get();
+        // material shader files change while the game runs: their generation is part of the handle
+        let generation = if crate::shaderdll::script::is_script_ps(&name) { crate::shaderdll::script::generation(&name) } else { 0 };
+        if let Some(c) = self.code.get(&key) {
+            if generation == 0 || c.as_ref().is_some_and(|c| c.get(2) == Some(&generation)) {
+                return c.clone();
+            }
+            // modules and pipelines are keyed by the handle's address: keep the old one alive so
+            // a new handle never lands at the same address
+            if let Some(old) = c.clone() {
+                self.retired_code.push(old);
+            }
+        }
         // built-in shaders have no bytecode: a unique handle per combo keeps the caches keyed
-        let c = if name.starts_with(crate::builtin::PREFIX) { Some(Arc::new(vec![r.static_index as u32, r.dynamic as u32])) } else { self.shaders.get(&name, r.static_index, r.dynamic) };
+        let c = if name.starts_with(crate::builtin::PREFIX) { Some(Arc::new(vec![r.static_index as u32, r.dynamic as u32, generation])) } else { self.shaders.get(&name, r.static_index, r.dynamic) };
         self.code.insert(key, c.clone());
         c
     }
@@ -1393,7 +1413,8 @@ impl Renderer {
             .filter_map(|&(loc, usage, index)| {
                 let e = elements.iter().find(|e| e.usage == usage && e.index == index)?;
                 let format = match e.ty {
-                    ElementType::Color => wgpu::VertexFormat::Unorm8x4,
+                    ElementType::Color | ElementType::UByte4 => wgpu::VertexFormat::Unorm8x4,
+                    ElementType::Short2 => wgpu::VertexFormat::Snorm16x2,
                     ElementType::Float(1) => wgpu::VertexFormat::Float32,
                     ElementType::Float(2) => wgpu::VertexFormat::Float32x2,
                     ElementType::Float(3) => wgpu::VertexFormat::Float32x3,
@@ -1776,7 +1797,7 @@ impl Renderer {
         }
 
         // screen effects run after the same draw (single-sampled only: they read the depth buffer)
-        let fx_end: Option<usize> = if present && crate::effects::any_enabled() { find_scene_end(&frame.cmds) } else { None };
+        let fx_end: Option<usize> = if present && (crate::effects::any_enabled() || crate::effects::previews_on()) { find_scene_end(&frame.cmds) } else { None };
         rects.push([0.0, 0.0, 1.0, 1.0]);
         let full_rect = rects.len() as u32 - 1;
         #[cfg(not(feature = "dlss"))]
@@ -1850,7 +1871,27 @@ impl Renderer {
             Blit { blit: usize },
             Dlss,
             Effects,
+            /// the scene's depth before (false) / after (true) its water, for the effects' solid depth
+            DepthSnapshot(bool),
         }
+        // the first and last water draw on the scene before the effects run
+        let water = {
+            let (mut t, mut n, mut first, mut last) = (BACK, 0usize, None, None);
+            for c in &frame.cmds {
+                match c {
+                    Cmd::Target { color, .. } => t = *color,
+                    Cmd::Draw(d) => {
+                        if t == BACK && fx_end.is_some_and(|e| n <= e) && d.ps.name.get().starts_with("water") {
+                            first = first.or(Some(n));
+                            last = Some(n);
+                        }
+                        n += 1;
+                    }
+                    _ => {}
+                }
+            }
+            first.zip(last)
+        };
         let mut dlss_pending = scene_end.is_some();
         let mut query_slots: Vec<(u64, u64)> = Vec::new();
         let mut open_query: Option<u64> = None;
@@ -1874,11 +1915,18 @@ impl Renderer {
                     steps.push(Step::Pass { target, depth_tex, color: cl, depth: dl, stencil: sl, mv: target == BACK && dlss_pending, draws: Vec::new() });
                 }
                 Cmd::Draw(d) => {
+                    // water writes depth over what's under it; effects (ao) want the ground
+                    if water.is_some_and(|w| w.0 == draw_no) {
+                        steps.push(Step::DepthSnapshot(false));
+                    }
                     if !matches!(steps.last(), Some(Step::Pass { target: t, depth_tex: dt, .. }) if *t == target && *dt == depth_tex) {
                         steps.push(Step::Pass { target, depth_tex, color: wgpu::LoadOp::Load, depth: wgpu::LoadOp::Load, stencil: wgpu::LoadOp::Load, mv: target == BACK && dlss_pending, draws: Vec::new() });
                     }
                     if let Some(Step::Pass { draws, .. }) = steps.last_mut() {
                         draws.push(Item::Draw(draw_no, d));
+                    }
+                    if water.is_some_and(|w| w.1 == draw_no) {
+                        steps.push(Step::DepthSnapshot(true));
                     }
                     if Some(draw_no) == scene_end {
                         steps.push(Step::Dlss);
@@ -1995,11 +2043,23 @@ impl Renderer {
                 }
                 #[cfg(not(feature = "dlss"))]
                 Step::Dlss => {}
+                Step::DepthSnapshot(after) => match &self.back_msaa {
+                    Some(m) => {
+                        let (md, n) = (m.depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() }), m.samples);
+                        self.effects.snapshot_depth(&self.device, &mut enc, &md, n, (w, h), *after);
+                    }
+                    None => {
+                        let depth = depth_by_target[&BACK].texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+                        self.effects.snapshot_depth(&self.device, &mut enc, &depth, 1, (w, h), *after);
+                    }
+                },
                 Step::Effects => {
                     let back = &self.targets[&BACK];
                     let (color, color_view) = (back.texture.clone(), back.view.clone());
                     let depth = depth_by_target[&BACK].texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-                    let inputs = crate::effects::Inputs { color: &color, color_view: &color_view, depth: &depth, motion: mv_view.as_ref(), jitter: frame.jitter.filter(|_| dlss_frame), depth_size: up.map(|[sx, sy]| (((w as f32 * sx).round() as u32).max(1), ((h as f32 * sy).round() as u32).max(1))), camera: frame.camera };
+                    // under msaa the scene's stencil is multisampled: no dynamic object mask
+                    let stencil = self.back_msaa.is_none().then(|| depth_by_target[&BACK].texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::StencilOnly, ..Default::default() }));
+                    let inputs = crate::effects::Inputs { color: &color, color_view: &color_view, depth: &depth, motion: mv_view.as_ref(), jitter: frame.jitter.filter(|_| dlss_frame), depth_size: up.map(|[sx, sy]| (((w as f32 * sx).round() as u32).max(1), ((h as f32 * sy).round() as u32).max(1))), camera: frame.camera, viewmodel: frame.viewmodel, viewmodel_lights: &frame.viewmodel_lights, sun: frame.sun, stencil: stencil.as_ref() };
                     match &self.back_msaa {
                         Some(m) => {
                             let (mc, md, n) = (m.color.clone(), m.depth.texture().create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() }), m.samples);
@@ -2287,14 +2347,13 @@ impl Renderer {
                 #[cfg(feature = "dlss")]
                 let status = match &self.dlss {
                     Some(d) if dlss_frame => {
-                        let j = frame.jitter.unwrap_or([0.0, 0.0]);
                         let flips = match (crate::dlss::FLIP_X.load(std::sync::atomic::Ordering::Relaxed), crate::dlss::FLIP_Y.load(std::sync::atomic::Ordering::Relaxed)) {
                             (false, false) => "",
                             (true, false) => " · x flipped",
                             (false, true) => " · y flipped",
                             (true, true) => " · x+y flipped",
                         };
-                        format!("{} {}×{} → {}×{} · {} ({:+.2}, {:+.2}){flips}", crate::dlss::mode_name(d.mode()), d.render_size().0, d.render_size().1, d.size().0, d.size().1, crate::dlss::jitter_mode_name(), j[0], j[1])
+                        format!("{} {}×{} → {}×{}{flips}", crate::dlss::mode_name(d.mode()), d.render_size().0, d.render_size().1, d.size().0, d.size().1)
                     }
                     Some(d) if d.enabled => format!("{} on, waiting for a scene", crate::dlss::mode_name(crate::dlss::MODE.load(std::sync::atomic::Ordering::Relaxed))),
                     Some(_) => "off (End toggles)".to_string(),
@@ -2304,6 +2363,24 @@ impl Renderer {
                 let status = "not built".to_string();
                 status
             },
+            builtin_draws: {
+                let mut by: std::collections::BTreeMap<String, (usize, std::collections::HashSet<i32>)> = Default::default();
+                for c in &frame.cmds {
+                    if let Cmd::Draw(d) = c {
+                        let name = d.ps.name.get();
+                        if let Some(rest) = name.strip_prefix(crate::builtin::PREFIX) {
+                            // wk_surfaceggx_ps -> surfaceggx
+                            let shader = rest.rsplit_once('_').map_or(rest, |r| r.0).to_string();
+                            let e = by.entry(shader).or_default();
+                            e.0 += 1;
+                            e.1.insert(d.ps.static_index);
+                        }
+                    }
+                }
+                by.into_iter().map(|(k, (n, s))| (k, n, s.len())).collect()
+            },
+            materials: crate::shaderdll::material_counts(),
+            effects: self.effects.status(),
             gpu_ms: self.gpu_us.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0,
             vertex_bytes: frame.vertices.len(),
             indices: frame.indices.len(),
@@ -2344,7 +2421,7 @@ impl Renderer {
         }
         if let Some(surface_tex) = &surface_tex {
             let surface_view = surface_tex.texture.create_view(&Default::default());
-            self.overlay.draw(&self.device, &self.queue, &mut enc, &surface_view, &stats);
+            self.overlay.draw(&self.device, &self.queue, &mut enc, &surface_view, &stats, self.effects.previews());
         }
         cmd_bufs.push(enc.finish());
         self.queue.submit(cmd_bufs);

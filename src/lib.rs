@@ -19,6 +19,7 @@ pub mod sampler;
 pub mod shader_util;
 pub mod shaderdll;
 pub mod shadow;
+pub mod stock;
 pub mod texconv;
 pub mod texlist;
 pub mod vcs;
@@ -29,6 +30,8 @@ pub mod vpk;
 pub mod overlay;
 pub mod dlss;
 pub mod effects;
+pub mod sss;
+pub mod gameui;
 pub mod vtables;
 pub mod vtf76;
 

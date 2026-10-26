@@ -13,6 +13,8 @@
 //! param: quality 2 0 3 int
 //! param: final_power 2.2 0.5 5
 //! param: max_distance 6000 256 20000 int
+//! param: viewmodel 1 0 1 int
+//! param: viewmodel_radius 3 0.5 16
 //! param: show 0 0 1 int
 
 // a port of Intel's XeGTAO 1.30 (MIT, https://github.com/GameTechDev/XeGTAO), itself based on
@@ -67,8 +69,22 @@ fn prefilter(i: WkVsOut) -> @location(0) vec4f {
     if !wk_has_camera() || wk_is_sky(d) {
         return vec4f(SKY_DEPTH);
     }
+    if wk_is_viewmodel(d) {
+        if params.viewmodel < 0.5 || !wk_has_viewmodel() {
+            return vec4f(SKY_DEPTH);
+        }
+        // the viewmodel's own projection, scaled so the world camera's unprojection (view_pos)
+        // rebuilds it at a uniform scale (vm_scale)
+        return vec4f(abs(wk_vm_view_pos(wk_snap(i.uv), d).z) * vm_scale());
+    }
     // the view axis distance, whatever the projection's handedness
     return vec4f(min(abs(wk_view_pos(wk_snap(i.uv), d).z), SKY_DEPTH));
+}
+
+/// world fov over viewmodel fov: the viewmodel, unprojected with the world camera, comes out
+/// scaled by this
+fn vm_scale() -> f32 {
+    return wk.proj[0][0] / wk.vm_proj[0][0];
 }
 
 // ---- pass 2: occlusion term and edges ----
@@ -148,7 +164,8 @@ fn main(i: WkVsOut) -> @location(0) vec4f {
     let edges = calculate_edges(z_raw, zl, zr, zt, zb);
     let packed = pack_edges(edges);
     let depth = wk_depth(i.uv);
-    if z_raw >= SKY_DEPTH || wk_is_viewmodel(depth) || z_raw > params.max_distance {
+    let vm = wk_is_viewmodel(depth);
+    if z_raw >= SKY_DEPTH || z_raw > params.max_distance {
         return vec4f(1.0 / OCCLUSION_TERM_SCALE, packed, 0.0, 0.0);
     }
     let uv = centre_uv(p);
@@ -163,7 +180,7 @@ fn main(i: WkVsOut) -> @location(0) vec4f {
     let q = u32(params.quality);
     let slices = array<f32, 4>(1.0, 2.0, 3.0, 9.0)[q];
     let steps = array<f32, 4>(2.0, 2.0, 3.0, 3.0)[q];
-    let effect_radius = params.radius * RADIUS_MULTIPLIER;
+    let effect_radius = select(params.radius, params.viewmodel_radius * vm_scale(), vm) * RADIUS_MULTIPLIER;
     let falloff_range = FALLOFF_RANGE * effect_radius;
     let falloff_from = effect_radius * (1.0 - FALLOFF_RANGE);
     let falloff_mul = -1.0 / falloff_range;
@@ -290,7 +307,8 @@ fn apply(i: WkVsOut) -> @location(0) vec4f {
     let color = textureSampleLevel(wk_color, wk_point, i.uv, 0.0);
     // ao is at depth resolution
     var occlusion = textureLoad(ao, wk_pixel(i.uv), 0).r;
-    if !wk_has_camera() {
+    // water drawn over the ground: no ao on its surface
+    if !wk_has_camera() || wk_covered(i.uv) {
         occlusion = 1.0;
     }
     if params.show > 0.5 {

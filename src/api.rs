@@ -190,7 +190,12 @@ pub enum Cmd {
 }
 
 /// uniform offsets must be 256-aligned
-pub const VS_BLOCK: usize = 4608;
+/// header (ints, bools, 16 extra registers) plus the float registers: VS_FLOAT_CONSTS, then last
+/// frame's bones for per-object motion vectors (see `object_motion`)
+pub const VS_BLOCK: usize = 7424;
+/// where last frame's bone (or model) rows start in a vs block's float registers
+pub const PREV_BONES: usize = 256;
+pub const MAX_BONES: usize = 53;
 pub const PS_BLOCK: usize = 1536;
 
 pub struct MeshUpload {
@@ -227,6 +232,12 @@ pub struct Frame {
     pub jitter: Option<[f32; 2]>,
     /// (view, proj) of the main 3d view (see `note_camera`)
     pub camera: Option<([f32; 16], [f32; 16])>,
+    /// the viewmodel's (view, proj, depth range) and the lights it was drawn with (see
+    /// `note_viewmodel`)
+    pub viewmodel: Option<([f32; 16], [f32; 16], [f32; 2])>,
+    pub viewmodel_lights: Vec<Light>,
+    /// the sun (light_environment) as models see it, kept for a while once seen (see `note_sun`)
+    pub sun: Option<Light>,
     pub record_ms: f32,
     pub capture: bool,
     /// frame hit its budget
@@ -363,14 +374,22 @@ pub struct State {
     tonemap_cache: ([u32; 3], i32, [f32; 4]),
     /// snapshots by id (they never change)
     snap_cache: Vec<Option<std::sync::Arc<shadow::ShadowState>>>,
-    /// cameras (view, view x proj) of this frame's / last frame's scene draws
-    vp_cur: Vec<([f32; 16], [f32; 16])>,
-    vp_prev: Vec<([f32; 16], [f32; 16])>,
-    reproj_cache: Option<([f32; 16], [f32; 16])>,
+    /// cameras (view, proj, view x proj) of this frame's / last frame's scene draws
+    vp_cur: Vec<([f32; 16], [f32; 16], [f32; 16])>,
+    vp_prev: Vec<([f32; 16], [f32; 16], [f32; 16])>,
+    /// view x proj -> (reprojection, last frame's view x proj)
+    reproj_cache: Option<([f32; 16], ([f32; 16], Option<[f32; 16]>))>,
+    /// bone / model rows of this frame's and last frame's scene draws, by object
+    motion_cur: HashMap<MotionKey, MotionSet>,
+    motion_prev: HashMap<MotionKey, MotionSet>,
+    /// the last vs block carried object motion
+    last_obj_motion: bool,
     /// handle -> (last issue, frame)
     pub queries: HashMap<u64, (u64, u64)>,
     next_query: u64,
     pub lighting_origin: [f32; 3],
+    /// last directional light handed to a model, and the frame it was seen
+    sun: Option<(Light, u64)>,
     /// for sharing identical blocks
     last_vs_block: Option<u32>,
     /// registers the last vs block holds
@@ -480,10 +499,14 @@ pub fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
         vp_cur: Default::default(),
         vp_prev: Default::default(),
         reproj_cache: None,
+        motion_cur: HashMap::new(),
+        motion_prev: HashMap::new(),
+        last_obj_motion: false,
         queries: HashMap::new(),
         next_query: 1,
         stencil: Stencil { enable: false, func: 8, fail: 1, zfail: 1, pass: 1, reference: 0, test_mask: 0xffff_ffff, write_mask: 0xffff_ffff },
         lighting_origin: [0.0; 3],
+        sun: None,
         last_vs_block: None,
         last_vs_regs: 0,
         vs_high: 0,
@@ -559,10 +582,10 @@ fn material_name(material: usize) -> String {
 }
 
 /// dynamic mesh format: explicit format wins, else the material's; bone weights follow the
-/// bone count
+/// bone count. never compressed (as in dx9: the mesh builder writes dynamic meshes uncompressed)
 fn dynamic_format(material: usize, explicit: u64, bones: i32) -> u64 {
     let mut fmt = if explicit != 0 {
-        explicit
+        explicit & !VERTEX_FORMAT_COMPRESSED
     } else if material != 0 {
         (unsafe { vcall::<u64>(material, MATERIAL_GET_VERTEX_FORMAT) }) & !VERTEX_FORMAT_COMPRESSED
     } else {
@@ -598,6 +621,17 @@ unsafe extern "C" fn get_flex_mesh(_t: *mut c_void) -> *mut c_void {
 }
 
 
+/// VERTEX_COMPRESSION_ON when the vertices a draw reads (the mesh, or the one overriding its
+/// vertex stream) are compressed, else VERTEX_COMPRESSION_NONE
+fn compression(mesh: *mut Mesh) -> i32 {
+    if mesh.is_null() {
+        return 0;
+    }
+    let m = unsafe { &*mesh };
+    let src = m.r().vertex_override.map(|v| unsafe { &*v }).unwrap_or(m).r();
+    (src.format & VERTEX_FORMAT_COMPRESSED != 0) as i32
+}
+
 pub fn draw_mesh(mesh: *mut Mesh, first: i32, count: i32) {
     // one api call including the material callback
     let _shader = crate::lock::guard();
@@ -615,7 +649,9 @@ pub fn draw_mesh(mesh: *mut Mesh, first: i32, count: i32) {
     unsafe {
         let vt = *(material as *const *const usize);
         let f: unsafe extern "C" fn(usize, i32) = std::mem::transmute(*vt.add(MATERIAL_DRAW_MESH));
-        f(material, 0); // VERTEX_COMPRESSION_NONE
+        // the shader picks its vertex decompression from this (VertexCompressionType_t), so it
+        // must match the vertex data the draw reads
+        f(material, compression(mesh));
     }
     if let Some(t) = t {
         DRAW_MESH_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -869,9 +905,10 @@ fn is_scene(s: &State) -> bool {
     s.render_target == -1 && s.matrices[1].last().unwrap()[11] != 0.0
 }
 
-/// this frame's clip space to last frame's. each camera matches last frame's nearest view matrix
-/// (2d sky, 3d skybox and world use different ones). f64 because world coords are large.
-fn reprojection(s: &mut State) -> [f32; 16] {
+/// this frame's clip space to last frame's, and last frame's view x proj. each camera matches last
+/// frame's nearest view and projection (2d sky, 3d skybox, world and viewmodel use different
+/// ones; the viewmodel shares the world's view). f64 because world coords are large.
+fn reprojection(s: &mut State) -> ([f32; 16], Option<[f32; 16]>) {
     let view = *s.matrices[0].last().unwrap();
     let proj = *s.matrices[1].last().unwrap();
     let vp = mat_mul(&view, &proj);
@@ -880,11 +917,12 @@ fn reprojection(s: &mut State) -> [f32; 16] {
             return *m;
         }
     }
-    if !s.vp_cur.iter().any(|(_, v)| *v == vp) {
-        s.vp_cur.push((view, vp));
+    if !s.vp_cur.iter().any(|(_, _, v)| *v == vp) {
+        s.vp_cur.push((view, proj, vp));
     }
-    let dist = |a: &[f32; 16]| a.iter().zip(&view).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
-    let prev = s.vp_prev.iter().min_by(|a, b| dist(&a.0).total_cmp(&dist(&b.0))).map(|p| p.1);
+    let d = |a: &[f32; 16], b: &[f32; 16]| a.iter().zip(b).map(|(x, y)| (x - y).abs() as f64).sum::<f64>();
+    let dist = |c: &([f32; 16], [f32; 16], [f32; 16])| d(&c.0, &view) + d(&c.1, &proj);
+    let prev = s.vp_prev.iter().min_by(|a, b| dist(a).total_cmp(&dist(b))).map(|p| p.2);
     let m = match prev {
         Some(p) if p == vp => IDENTITY,
         Some(p) => mat_inverse_f64(&vp).map(|inv| {
@@ -898,8 +936,85 @@ fn reprojection(s: &mut State) -> [f32; 16] {
         }).unwrap_or(IDENTITY),
         None => IDENTITY,
     };
-    s.reproj_cache = Some((vp, m));
-    m
+    s.reproj_cache = Some((vp, (m, prev)));
+    (m, prev)
+}
+
+/// a model across frames: mesh, index range, material, bone count. copies of the same model
+/// (a field of bushes) share a key and are told apart by their rows, see `object_motion`
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct MotionKey {
+    mesh: usize,
+    first: i32,
+    count: i32,
+    material: usize,
+    bones: usize,
+}
+
+/// the rows of every copy drawn under one key in a frame, plus their hashes for exact lookups
+#[derive(Default)]
+struct MotionSet {
+    rows: Vec<Vec<[f32; 4]>>,
+    exact: std::collections::HashSet<u64>,
+}
+
+fn rows_hash(rows: &[[f32; 4]]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for r in rows {
+        for v in r {
+            v.to_bits().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// a copy that moved further than this between frames is taken for a different copy
+const MOTION_MATCH_DISTANCE: f32 = 64.0;
+/// nearest-copy search gives up past this many copies (a field of grass)
+const MOTION_MATCH_LIMIT: usize = 256;
+
+/// last frame's rows for this copy: none when some copy sat exactly here (it didn't move, even if
+/// source drew the copies in another order), else the nearest copy by position
+fn previous_rows(prev: &MotionSet, rows: &[[f32; 4]]) -> Option<Vec<[f32; 4]>> {
+    if prev.exact.contains(&rows_hash(rows)) {
+        return None;
+    }
+    if prev.rows.len() > MOTION_MATCH_LIMIT {
+        return None;
+    }
+    // the first bone's (or the model's) translation
+    let pos = |r: &[[f32; 4]]| [r[0][3], r[1][3], r[2][3]];
+    let here = pos(rows);
+    let dist = |r: &Vec<[f32; 4]>| {
+        let p = pos(r);
+        (p[0] - here[0]).abs() + (p[1] - here[1]).abs() + (p[2] - here[2]).abs()
+    };
+    let best = prev.rows.iter().min_by(|a, b| dist(a).total_cmp(&dist(b)))?;
+    (dist(best) < MOTION_MATCH_DISTANCE).then(|| best.clone())
+}
+
+/// per-object motion vectors under dlss: this draw's bone rows (c58 on, or the model rows for an
+/// unskinned draw) are kept for next frame; when last frame's rows differ, the vertex shader skins
+/// with both and adds the difference to the camera reprojection. returns the extra registers
+/// (reprojection, last frame's view x proj, flags) and last frame's rows.
+fn object_motion(s: &mut State, skinned: bool) -> Option<([[f32; 4]; 9], Vec<[f32; 4]>)> {
+    let bones = if skinned { s.bones.len().clamp(1, MAX_BONES) } else { 0 };
+    let rows: Vec<[f32; 4]> = s.vs_constants[58..58 + 3 * bones.max(1)].to_vec();
+    let key = MotionKey { mesh: s.mesh, first: s.first_index, count: s.index_count, material: s.material, bones };
+    let prev = s.motion_prev.get(&key).and_then(|p| previous_rows(p, &rows));
+    let cur = s.motion_cur.entry(key).or_default();
+    cur.exact.insert(rows_hash(&rows));
+    cur.rows.push(rows);
+    let prev = prev?;
+    let (m, Some(pvp)) = reprojection(s) else { return None };
+    let mut out = [[0.0f32; 4]; 9];
+    for k in 0..4 {
+        out[k] = column(&m, k);
+        out[4 + k] = column(&pvp, k);
+    }
+    out[8] = [1.0, bones as f32, 0.0, 0.0];
+    Some((out, prev))
 }
 
 /// vs block tail: half-pixel offset, user clip planes in clip space (disabled = zero, never clips),
@@ -974,7 +1089,8 @@ fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
     let [sx, sy] = if jitter.is_some() { crate::dlss::render_scale() } else { [1.0, 1.0] };
     let (w, h) = (w as f32 * sx, h as f32 * sy);
     out[0] = [1.0 / w, 1.0 / h, 2.0 * jx / w, -2.0 * jy / h];
-    let m = if jitter.is_some() && s.viewport_depth[1] > 0.15 { reprojection(s) } else { IDENTITY };
+    // the viewmodel moves with the camera: no camera reprojection (object motion adds its own)
+    let m = if jitter.is_some() && s.viewport_depth[1] > 0.15 { reprojection(s).0 } else { IDENTITY };
     for k in 0..4 {
         out[7 + k] = column(&m, k);
     }
@@ -996,13 +1112,18 @@ fn vs_extra(s: &mut State) -> [[f32; 4]; 11] {
 /// shares the previous block when equal
 /// vs block: ints, bools, the extra tail, then `regs` float registers, padded to 256 bytes.
 /// returns its offset in 256-byte units.
-fn push_vs_block(s: &mut State, extra: &[[f32; 4]; 11], regs: usize) -> u32 {
+fn push_vs_block(s: &mut State, extra: &[[f32; 4]; 16], regs: usize, prev_rows: Option<&[[f32; 4]]>) -> u32 {
     let b = &mut s.frame.vs_blocks;
     let start = b.len();
     b.extend_from_slice(bytemuck::cast_slice(&s.vs_ints));
     b.extend_from_slice(bytemuck::cast_slice(&[s.vs_bools, 0, 0, 0]));
     b.extend_from_slice(bytemuck::cast_slice(extra));
     b.extend_from_slice(bytemuck::cast_slice(&s.vs_constants[..regs]));
+    if let Some(rows) = prev_rows {
+        let base = start + (16 + 1 + 16 + PREV_BONES) * 16;
+        b.resize(base, 0);
+        b.extend_from_slice(bytemuck::cast_slice(rows));
+    }
     b.resize(b.len().next_multiple_of(256), 0);
     s.frame.vs_block_count += 1;
     s.last_vs_block = Some((start / 256) as u32);
@@ -1043,8 +1164,8 @@ fn push_draw(s: &mut State, c: Cmd) {
                 d.geometry, d.first_index, d.index_count, d.format, d.stride, d.viewport, d.depth, d.vs_block, d.ps_block, d.ps_opts, d.key, d.color, tex.join(" ")
             ));
             // shadow receivers: log the flashlight constants
-            if d.ps_opts.shadow_depth != 0 {
-                let c: Vec<String> = s.ps_constants[..32].iter().enumerate().map(|(i, v)| format!("c{i}={v:?}")).collect();
+            if d.ps_opts.shadow_depth != 0 || d.ps.name.get().starts_with(crate::builtin::PREFIX) {
+                let c: Vec<String> = s.ps_constants[..54].iter().enumerate().map(|(i, v)| format!("c{i}={v:?}")).collect();
                 log::line(&format!("    ps constants: {}", c.join(" ")));
             }
         }
@@ -1192,9 +1313,17 @@ fn record_draw_inner(s: &mut State) {
     lap.lap(5);
     // unskinned shaders read up to the model matrix (c58..c60), skinned ones the bones after it
     let regs = if skinned { 58 + 3 * s.bones.len().max(1) } else { 61 }.max(s.vs_high + 1).min(s.vs_constants.len());
+    let motion = if is_scene(s) && crate::dlss::jitter(s.frames).is_some() { object_motion(s, skinned) } else { None };
+    let mut ext = [[0.0f32; 4]; 16];
+    ext[..11].copy_from_slice(&extra);
+    if let Some((regs, _)) = &motion {
+        ext[7..16].copy_from_slice(regs);
+    }
+    let fresh = motion.is_some() || s.last_obj_motion;
+    s.last_obj_motion = motion.is_some();
     let vs_block = match s.last_vs_block {
-        Some(b) if !s.vs_dirty && regs <= s.last_vs_regs => b,
-        _ => push_vs_block(s, &extra, regs),
+        Some(b) if !s.vs_dirty && !fresh && regs <= s.last_vs_regs => b,
+        _ => push_vs_block(s, &ext, regs, motion.as_ref().map(|m| m.1.as_slice())),
     };
     s.vs_dirty = false;
     // -1 for the scene under dlss (guide 3.5)
@@ -1224,6 +1353,10 @@ fn record_draw_inner(s: &mut State) {
         (None, 0)
     };
     let ov = s.ov;
+    let (stencil, stencil_ref) = match stencil {
+        None if mark_dynamic(s, &snap, &ov) => (Some((8, 1, 1, 3, 0xff, 0x80)), if dynamic_object(s, vsrc.format, md.color_mesh.is_some()) { 0x80 } else { 0 }),
+        x => (x, stencil_ref),
+    };
     let (blend, blend_alpha) = match ov.blend {
         Some((separate, src, dst, op)) => (Some((src, dst, op)), if separate { ov.blend_alpha } else { None }),
         None => (snap.blend.then_some((snap.blend_src, snap.blend_dst, snap.blend_op)), (snap.blend && snap.blend_separate_alpha).then_some((snap.blend_src_alpha, snap.blend_dst_alpha, snap.blend_op_alpha))),
@@ -1264,8 +1397,14 @@ fn record_draw_inner(s: &mut State) {
     let ps = ShaderRef { name: ps_name, static_index: snap.pixel_shader_static, dynamic: s.ps_index };
     let (viewport, depth, format, scissor, clip) = (s.viewport, s.viewport_depth, vsrc.format, s.scissor, s.clip_enabled != 0);
     let scene = is_scene(s);
+    if scene && depth[1] <= 0.15 {
+        note_viewmodel(s);
+    }
     if scene && depth[1] > 0.15 {
         note_camera(s);
+    }
+    if scene {
+        note_sun(s);
     }
     // baked vertex lighting, stream 1
     let color = md.color_mesh.and_then(|(cm, first)| {
@@ -1403,6 +1542,45 @@ fn note_camera(s: &mut State) {
         s.camera_best = n;
         s.frame.camera = Some((view, proj));
     }
+}
+
+/// the viewmodel draws with its own projection in a squeezed depth range; effects need both to
+/// rebuild its positions, and every light its parts were drawn with for contact shadows
+fn note_viewmodel(s: &mut State) {
+    let (view, proj) = (*s.matrices[0].last().unwrap(), *s.matrices[1].last().unwrap());
+    s.frame.viewmodel = Some((view, proj, s.viewport_depth));
+    for l in s.lights.iter().flatten() {
+        if s.frame.viewmodel_lights.len() < 8 && !s.frame.viewmodel_lights.contains(l) {
+            s.frame.viewmodel_lights.push(*l);
+        }
+    }
+}
+
+/// source hands models the sun as their only directional light, and only when they can see it;
+/// the last one seen stays for 10 seconds so looking indoors for a moment doesn't drop it
+fn note_sun(s: &mut State) {
+    if let Some(l) = s.lights.iter().flatten().find(|l| l.kind == 2) {
+        s.sun = Some((*l, s.frames));
+    }
+    s.frame.sun = s.sun.filter(|(_, f)| s.frames.saturating_sub(*f) < 600).map(|(l, _)| l);
+}
+
+/// for effects (`wk_is_dynamic`): opaque scene draws that write depth, while source isn't using
+/// the stencil itself, write stencil bit 0x80 (always, replace), so the last surface drawn at a
+/// pixel decides it
+fn mark_dynamic(s: &State, snap: &shadow::ShadowState, ov: &Overrides) -> bool {
+    crate::effects::DYNAMIC_MASK.load(std::sync::atomic::Ordering::Relaxed)
+        && is_scene(s)
+        && ov.depth_write.unwrap_or(snap.depth_write)
+        && ov.blend.is_none()
+        && !snap.blend
+}
+
+/// moving things the lightmaps don't know about: models and moved brush entities, but not static
+/// props when they carry baked vertex lighting (vrad shadows them)
+fn dynamic_object(s: &State, format: VertexFormat, color_mesh: bool) -> bool {
+    let model = format & crate::abi::VERTEX_BONE_INDEX != 0;
+    if model { !color_mesh } else { *s.matrices[10].last().unwrap() != IDENTITY }
 }
 
 /// once per material and reason
@@ -1583,9 +1761,12 @@ fn capture_key() -> bool {
 }
 
 pub fn present() {
+    // before the shader lock: registering shaders calls back into the dll
+    crate::shaderdll::script::poll();
     // lock order: shader mutex, then renderer
     let _shader = crate::lock::guard();
     crate::sampler::note_thread(crate::sampler::Target::Game);
+    crate::gameui::tick();
     let capture = capture_key();
     let (frame_no, draws, mat, frame) = with(|s| {
         if s.frames == s.trace_from {
@@ -1617,6 +1798,8 @@ pub fn present() {
         frame.jitter = crate::dlss::jitter(s.frames - 1);
         s.vp_prev = std::mem::take(&mut s.vp_cur);
         s.reproj_cache = None;
+        s.motion_prev = std::mem::take(&mut s.motion_cur);
+        s.last_obj_motion = false;
         s.last_vs_block = None;
         s.last_ps_block = None;
         if s.render_target != -1 || s.render_depth != -1 {
@@ -1692,15 +1875,18 @@ unsafe extern "C" fn compute_vertex_format(_t: *mut c_void, n: i32, ids: *const 
             return fmts[0];
         }
         let (mut flags, mut bones, mut user, mut tc) = (0u64, 0usize, 0usize, [0i32; MAX_TEXCOORDS]);
+        // compressed only when every pass takes compressed vertices
+        let compressed = fmts.iter().all(|f| f & VERTEX_FORMAT_COMPRESSED != 0);
         for f in fmts {
-            flags |= vertex_flags(f);
+            flags |= vertex_flags(f) & !VERTEX_FORMAT_COMPRESSED;
             bones = bones.max(num_bone_weights(f));
             user = user.max(user_data_size(f));
             for (j, t) in tc.iter_mut().enumerate() {
                 *t = (*t).max(texcoord_size(j, f) as i32);
             }
         }
-        crate::abi::compute_vertex_format(flags, MAX_TEXCOORDS, Some(&tc), bones, user)
+        let compressed = if compressed { VERTEX_FORMAT_COMPRESSED } else { 0 };
+        crate::abi::compute_vertex_format(flags | compressed, MAX_TEXCOORDS, Some(&tc), bones, user)
     })
 }
 unsafe extern "C" fn compare_snapshots(_t: *mut c_void, a: i16, b: i16) -> i32 {

@@ -80,6 +80,12 @@ shader tests are skipped.
 
 See [LICENSE](LICENSE.md).
 
+Third-party code:
+
+- `effects/gtao.wgsl` ports Intel's [XeGTAO](https://github.com/GameTechDev/XeGTAO) (MIT).
+- `src/sss.rs` ports Bend Studio's [screen space shadows](https://www.bendstudio.com/blog/inside-bend-screen-space-shadows/)
+  (Copyright 2023 Sony Interactive Entertainment, Apache License 2.0).
+
 ---
 
 <sub>wulkanium is an unofficial fan project and is not affiliated with, endorsed by or sponsored

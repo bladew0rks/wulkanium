@@ -35,6 +35,7 @@ end)
 -- dlss quality (dlss builds; End toggles dlss itself)
 CreateClientConVar("wk_dlss_mode", "0", true, false, "DLSS mode: 0 DLAA, 1 Quality, 2 Balanced, 3 Performance, 4 Ultra Performance", 0, 4)
 CreateClientConVar("wk_dlss_mip_bias", "0", true, false, "added to DLSS's texture mip bias; positive = less sharp, less shimmer", -1, 1)
+CreateClientConVar("wk_ggx_debug", "0", false, false, "SurfaceGGX debug view: 1 albedo, 2 normal, 3 roughness, 4 metal, 5 diffuse light, 6 direct specular, 7 reflection, 8 ambient cube, 9 raw mask, 10 raw bump, 11 uv", 0, 11)
 
 hook.Add("PopulateToolMenu", "wulkanium_dlss", function()
 	spawnmenu.AddToolMenuOption("Options", "wulkanium", "wulkanium_dlss", "DLSS", "", "", function(panel)
@@ -43,9 +44,6 @@ hook.Add("PopulateToolMenu", "wulkanium_dlss", function()
 		for i, name in ipairs({ "DLAA (native)", "Quality", "Balanced", "Performance", "Ultra Performance" }) do
 			box:AddChoice(name, i - 1)
 		end
-		panel:NumSlider("Texture sharpness offset", "wk_dlss_mip_bias", -1, 1, 2)
-		panel:Help("Raise the offset if textures shimmer under DLSS (up to 1).")
-		panel:Help("End turns DLSS on and off. Needs nvngx_dlss.dll in bin/win64.")
 	end)
 end)
 

@@ -88,7 +88,9 @@ pub fn interface() -> crate::Interface {
             (s::GetSamplerCount, f(sixteen as *const ())),
             (s::HasSetDeviceGammaRamp, f(yes as *const ())),
             (s::SupportsCompressedTextures, f(yes as *const ())),
-            (s::SupportsCompressedVertices, f(zero as *const ())),
+            // VERTEX_COMPRESSION_ON: model materials then carry VERTEX_FORMAT_COMPRESSED, which gmod
+            // requires before it applies Entity:SetMaterial (see abi::compute_vertex_desc)
+            (s::SupportsCompressedVertices, f(compression_on as *const ())),
             (s::SupportsNormalMapCompression, f(no as *const ())),
             (s::SupportsVertexAndPixelShaders, f(yes as *const ())),
             (s::SupportsPixelShaders_1_4, f(yes as *const ())),
@@ -158,4 +160,9 @@ pub fn interface() -> crate::Interface {
             (s::GetHWSpecificShaderDLLName, f(hw_shader_dll_name as *const ())),
         ],
     )
+}
+
+/// VertexCompressionType_t VERTEX_COMPRESSION_ON
+unsafe extern "C" fn compression_on(_t: *mut c_void) -> i32 {
+    1
 }

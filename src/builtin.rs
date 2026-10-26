@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use crate::d3d2wgsl::{PS_FLOAT_CONSTS, PsOptions, Translated, VS_FLOAT_CONSTS};
+use crate::d3d2wgsl::{PS_FLOAT_CONSTS, Packed, PsOptions, Translated, VS_FLOAT_CONSTS};
 
 pub const PREFIX: &str = "wk_";
 
@@ -51,9 +51,9 @@ fn parse_label(label: &str) -> (&str, u32) {
     (name, st)
 }
 
-const VCONSTS: &str = "struct VConsts {\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n    c: array<vec4f, VSN>,\n}\n@group(0) @binding(0) var<uniform> V: VConsts;\n";
+const VCONSTS: &str = "struct VConsts {\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n    pvp: array<vec4f, 4>,\n    obj: vec4f,\n    c: array<vec4f, VSN>,\n}\n@group(0) @binding(0) var<uniform> V: VConsts;\n";
 
-pub fn translate_vs(label: &str, present: &dyn Fn(u8, u8) -> bool, clip: bool, mv: bool) -> Result<Translated, String> {
+pub fn translate_vs(label: &str, present: &dyn Fn(u8, u8) -> bool, packed: &dyn Fn(u8, u8) -> Packed, clip: bool, mv: bool) -> Result<Translated, String> {
     let (name, _st) = parse_label(label);
     if name != ggx::VS {
         return Err(format!("unknown built-in shader {name}"));
@@ -62,7 +62,7 @@ pub fn translate_vs(label: &str, present: &dyn Fn(u8, u8) -> bool, clip: bool, m
     if clip {
         out += "enable clip_distances;\n";
     }
-    out += &VCONSTS.replace("VSN", &VS_FLOAT_CONSTS.to_string());
+    out += &VCONSTS.replace("VSN", &(VS_FLOAT_CONSTS + 3 * crate::api::MAX_BONES).to_string());
     // (name, usage, index, default)
     let wanted: [(&str, u8, u8, &str); 9] = [
         ("pos", 0, 0, "vec4f(0.0, 0.0, 0.0, 1.0)"),
@@ -78,12 +78,26 @@ pub fn translate_vs(label: &str, present: &dyn Fn(u8, u8) -> bool, clip: bool, m
     let mut inputs = Vec::new();
     let mut fields = String::new();
     let mut loads = String::new();
+    // compressed vertices: normal and tangent share one ubyte4, weights are shorts
+    let packed_normal = present(3, 0) && packed(3, 0) == Packed::UByte4;
     for (n, usage, index, def) in wanted {
         if present(usage, index) {
             let loc = inputs.len() as u32;
             inputs.push((loc, usage, index));
             let _ = writeln!(fields, "    @location({loc}) {n}: vec4f,");
-            let _ = writeln!(loads, "    let {n} = vin.{n};");
+            match (usage, index, packed(usage, index)) {
+                (3, 0, Packed::UByte4) => {
+                    let _ = writeln!(loads, "    let nt = unpack_normal_tangent(round(vin.{n} * 255.0));\n    let normal = vec4f(nt.n, 0.0);");
+                }
+                (1, 0, Packed::Short2) => {
+                    let _ = writeln!(loads, "    let {n} = vec4f((round(vin.{n}.xy * 32767.0) + 1.0) / 32768.0, 0.0, 0.0);");
+                }
+                _ => {
+                    let _ = writeln!(loads, "    let {n} = vin.{n};");
+                }
+            }
+        } else if usage == 6 && packed_normal {
+            let _ = writeln!(loads, "    let tangent = nt.t;");
         } else {
             let _ = writeln!(loads, "    let {n} = {def};");
         }
@@ -103,6 +117,25 @@ pub fn translate_vs(label: &str, present: &dyn Fn(u8, u8) -> bool, clip: bool, m
     }
     out += "}\n\n";
     out += r#"
+struct NormalTangent {
+    n: vec3f,
+    t: vec4f,
+}
+
+/// source's compressed normal + tangent: one ubyte4, each vector as two octahedron-like bytes
+/// with the signs folded in (as the stock shaders' DecompressVertex_NormalTangent)
+fn unpack_normal_tangent(i: vec4f) -> NormalTangent {
+    let zt_sign = select(vec4f(0.0), vec4f(1.0), i - 128.0 < vec4f(0.0));
+    let xy_abs = abs(i - 128.0) - zt_sign;
+    let xy_sign = select(vec4f(0.0), vec4f(1.0), xy_abs - 64.0 < vec4f(0.0));
+    let nt = (abs(xy_abs - 64.0) - xy_sign) / 63.0;
+    let xy_signs = 1.0 - 2.0 * xy_sign;
+    let zt_signs = 1.0 - 2.0 * zt_sign;
+    let n = normalize(vec3f(nt.xy, 1.0 - nt.x - nt.y));
+    let t = normalize(vec3f(nt.zw, 1.0 - nt.z - nt.w));
+    return NormalTangent(vec3f(n.xy * xy_signs.xy, n.z * zt_signs.x), vec4f(t.xy * xy_signs.zw, t.z * zt_signs.z, zt_signs.w));
+}
+
 fn model_row(bone: i32, r: i32) -> vec4f {
     return V.c[58 + 3 * bone + r];
 }
@@ -154,6 +187,8 @@ fn main(vin: VIn) -> VOut {
     }
     if mv {
         out += "    out.cur = out.pos;\n    out.prev = vec4f(dot(out.pos, V.mvm[0]), dot(out.pos, V.mvm[1]), dot(out.pos, V.mvm[2]), dot(out.pos, V.mvm[3]));\n";
+        // raw ubyte4 bone indices here, in order
+        out += &crate::d3d2wgsl::object_motion("pos", skinned.then_some("vec3f(weights.x, weights.y, 1.0 - weights.x - weights.y)"), skinned.then_some("vec4<i32>(round(bones * 255.0)).xyz"));
     }
     // d3d9 pixel centres, plus dlss jitter (as translated shaders do)
     out += "    out.pos = vec4f(out.pos.x + (V.hp.x + V.hp.z) * out.pos.w, out.pos.y - (V.hp.y - V.hp.w) * out.pos.w, out.pos.zw);\n    return out;\n}\n";
@@ -163,6 +198,9 @@ fn main(vin: VIn) -> VOut {
 /// samplers: 0 base, 1 bump, 2 mask, 3 envmap (cube), 4 detail normal
 pub fn translate_ps(label: &str, opts: &PsOptions, mv: bool) -> Result<Translated, String> {
     use ggx::*;
+    if crate::shaderdll::script::is_script_ps(label) {
+        return crate::shaderdll::script::translate_ps(label, opts, mv);
+    }
     let (name, st) = parse_label(label);
     if name != PS {
         return Err(format!("unknown built-in shader {name}"));
@@ -246,13 +284,26 @@ fn light_dir(i: i32, world: vec3f) -> vec3f {{
 
 fn d_ggx(nh: f32, a2: f32) -> f32 {{
     let d = nh * nh * (a2 - 1.0) + 1.0;
-    return a2 / (PI * d * d);
+    return a2 / max(PI * d * d, 1e-7);
 }}
 
-fn v_smith(nv: f32, nl: f32, a2: f32) -> f32 {{
-    let gv = nl * sqrt(nv * nv * (1.0 - a2) + a2);
-    let gl = nv * sqrt(nl * nl * (1.0 - a2) + a2);
-    return 0.5 / max(gv + gl, 1e-5);
+/// visibility from l.h alone (bounded at grazing angles), as the DX11 SurfaceGGX uses
+fn vis_lh(lh: f32, a: f32) -> f32 {{
+    let x = lh + sqrt(lh * lh * (1.0 - a) + a);
+    return 1.0 / (x * x);
+}}
+
+/// the ambient cube as six lights through the same ggx lobe, weighted down for rough surfaces
+fn ambient_spec(n: vec3f, v: vec3f, roughness: f32, a: f32, a2: f32) -> vec3f {{
+    let k = roughness / min(roughness + 0.5, 1.0);
+    var sum = vec3f(0.0);
+    for (var i = 0; i < 6; i++) {{
+        var d = vec3f(0.0);
+        d[i / 2] = select(1.0, -1.0, (i & 1) == 1);
+        let h = normalize(v + d);
+        sum += P.c[{a} + i].rgb * d_ggx(clamp(dot(n, h), 0.0, 1.0), a2) * vis_lh(clamp(dot(d, h), 0.0, 1.0), a) * clamp(dot(n, d), 0.0, 1.0);
+    }}
+    return sum * k * k;
 }}
 
 fn f_schlick(f0: vec3f, vh: f32) -> vec3f {{
@@ -266,7 +317,8 @@ fn env_brdf(f0: vec3f, roughness: f32, nv: f32) -> vec3f {{
     let r = roughness * c0 + c1;
     let a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
     let ab = vec2f(-1.04, 1.04) * a004 + r.zw;
-    return f0 * ab.x + ab.y;
+    // the bias term fades out for f0 near zero (no reflection at all)
+    return f0 * ab.x + clamp(f0.g * 50.0, 0.0, 1.0) * ab.y;
 }}
 
 @fragment
@@ -277,7 +329,7 @@ fn main(fin: FIn) -> FOut {{
     let base = fetch0(textureSampleBias(tex0, smp0, uv, mip_bias));
     let tint = P.c[{tint}];
     let albedo = base.rgb * tint.rgb;
-    var n = normalize(fin.l2.xyz) * select(-1.0, 1.0, fin.ff);
+    var n = normalize(fin.l2.xyz);
     var roughness = 1.0;
     var metal = 0.0;
     var fuzz = 0.0;
@@ -312,7 +364,7 @@ fn main(fin: FIn) -> FOut {{
     }
     let _ = write!(
         out,
-        r#"    roughness = clamp(roughness * surface.x, 0.02, 1.0);
+        r#"    roughness = max(clamp(roughness * surface.x, 0.0, 1.0), 0.03);
     let a = roughness * roughness;
     let a2 = a * a;
     let f0 = {f0};
@@ -324,6 +376,10 @@ fn main(fin: FIn) -> FOut {{
     if fin.l4.w > 0.0 {{
         diffuse = fin.l4.rgb * fin.l4.rgb;
     }}
+    // direct light: ggx with l.h visibility plus a (2 - F) / pi diffuse, the DX11 SurfaceGGX
+    // model. source light colours are lambert-scaled (albedo * light * nl), so both terms get
+    // pi / 2 to land the diffuse back on that
+    var direct = vec3f(0.0);
     var specular = vec3f(0.0);
     let lights = i32(P.c[{diff}].w);
     for (var i = 0; i < 4; i++) {{
@@ -337,27 +393,29 @@ fn main(fin: FIn) -> FOut {{
         diff = C_DIFFUSION,
         lt = C_LIGHTS,
     );
+    out += r#"        let h = normalize(l + v);
+        let f = f_schlick(f0, clamp(dot(v, h), 0.0, 1.0));
+"#;
     if on(SSS) {
         // wrapped diffuse per channel, front and back
-        let _ = writeln!(out, "        let wf = P.c[{C_DIFFUSION}].rgb;\n        diffuse += radiance * clamp((vec3f(nl_raw) + wf) / (1.0 + wf), vec3f(0.0), vec3f(1.0));");
+        let _ = writeln!(out, "        let wf = P.c[{C_DIFFUSION}].rgb;\n        let wrap = clamp((vec3f(nl_raw) + wf) / (1.0 + wf), vec3f(0.0), vec3f(1.0));");
     } else {
-        out += "        diffuse += radiance * nl;\n";
+        out += "        let wrap = vec3f(nl);\n";
     }
-    out += r#"        if nl > 0.0 {
-            let h = normalize(l + v);
-            let nh = max(dot(n, h), 0.0);
-            let vh = max(dot(v, h), 0.0);
-            specular += d_ggx(nh, a2) * v_smith(nv, nl, a2) * f_schlick(f0, vh) * radiance * nl * PI;
-        }
+    out += r#"        direct += diffuse_color * (1.0 - 0.5 * f) * wrap * radiance;
+        let s = d_ggx(clamp(dot(n, h), 0.0, 1.0), a2) * vis_lh(clamp(dot(l, h), 0.0, 1.0), a) * f * (0.5 * PI) * nl * radiance;
+        direct += s;
+        specular += s;
     }
-    var color = diffuse_color * diffuse + specular;
+    var color = diffuse_color * diffuse + direct;
+    var env_term = vec3f(0.0);
 "#;
     if on(FUZZ) {
         out += "    color += fuzz * pow(1.0 - nv, 4.0) * albedo * ambient(n);\n";
     }
     if !on(ENVMAP) {
         // no cubemap: the ambient cube in the reflection direction stands in, so metals aren't black
-        out += "    color += ambient(reflect(-v, n)) * env_brdf(f0, roughness, nv);\n";
+        out += "    color += ambient_spec(n, v, roughness, a, a2) * env_brdf(f0, roughness, nv);\n";
     }
     if on(ENVMAP) {
         let _ = write!(
@@ -365,11 +423,21 @@ fn main(fin: FIn) -> FOut {{
             r#"    let r = reflect(-v, n);
     let levels = f32(textureNumLevels(tex3));
     // c30.z: cubemap scale (16 under integer hdr, where cubemaps are stored scaled down)
-    let env = fetch3(textureSampleLevel(tex3, smp3, r, roughness * (levels - 1.0))).rgb * P.c[{env}].rgb * P.c[30].z;
-    color += env * env_brdf(f0, roughness, nv);
+    let cube = fetch3(textureSampleLevel(tex3, smp3, r, min((roughness - 0.001) * 8.0, levels - 1.0))).rgb * P.c[30].z;
+    // rough surfaces lean on the ggx-filtered ambient cube, which carries local light the cubemap misses
+    let env = mix(cube, ambient_spec(n, v, roughness, a, a2), roughness) * P.c[{env}].rgb;
+    env_term = env * env_brdf(f0, roughness, nv);
+    color += env_term;
 "#,
             env = C_ENV
         );
+    }
+    let mut raw_cases = String::new();
+    if on(MASK) || on(PBR) {
+        raw_cases += "        case 9: { outc = vec4f(textureSample(tex2, smp2, uv).rgb, 1.0); }\n";
+    }
+    if on(BUMP) {
+        raw_cases += "        case 10: { outc = vec4f(textureSample(tex1, smp1, uv).rgb, 1.0); }\n";
     }
     let alpha = if on(ALPHA) { "base.a * tint.a" } else { "tint.a" };
     let _ = write!(
@@ -380,8 +448,23 @@ fn main(fin: FIn) -> FOut {{
     let fog_factor = clamp(min(fog.z, fin.l1.w * fog.w - fog.x), 0.0, 1.0);
     color = mix(color, P.c[29].rgb, fog_factor);
     var outc = vec4f(color, {alpha});
+    // wk_ggx_debug (c4.x): 1 albedo, 2 normal, 3 roughness, 4 metal, 5 diffuse light, 6 direct specular, 7 reflection, 8 ambient cube, 9 raw mask, 10 raw bump, 11 uv
+    switch i32(P.c[{extra}].x) {{
+        case 1: {{ outc = vec4f(albedo, 1.0); }}
+        case 2: {{ outc = vec4f(n * 0.5 + 0.5, 1.0); }}
+        case 3: {{ outc = vec4f(vec3f(roughness), 1.0); }}
+        case 4: {{ outc = vec4f(vec3f(metal), 1.0); }}
+        case 5: {{ outc = vec4f(diffuse * P.c[30].x, 1.0); }}
+        case 6: {{ outc = vec4f(specular * P.c[30].x, 1.0); }}
+        case 7: {{ outc = vec4f(env_term * P.c[30].x, 1.0); }}
+        case 8: {{ outc = vec4f(ambient(n) * P.c[30].x, 1.0); }}
+{raw}        case 11: {{ outc = vec4f(fract(uv), 0.0, 1.0); }}
+        default: {{}}
+    }}
 "#,
-        fog = C_FOG
+        fog = C_FOG,
+        extra = C_EXTRA,
+        raw = raw_cases
     );
     if let Some((func, r)) = opts.alpha_test {
         let a = "u32(round(clamp(outc.a, 0.0, 1.0) * 255.0))";
@@ -419,6 +502,14 @@ mod tests {
             .unwrap_or_else(|e| panic!("{}\n{wgsl}", e.emit_to_string(wgsl)));
     }
 
+    /// WK_DUMP_PS=<static combo> prints that pixel shader
+    #[test]
+    fn dump_ps() {
+        let Ok(st) = std::env::var("WK_DUMP_PS") else { return };
+        let opts = PsOptions { srgb_read: 0x8001, srgb_write: true, alpha_test: None, shadow_depth: 0 };
+        println!("{}", translate_ps(&format!("{}/{st}+0", ggx::PS), &opts, false).unwrap().wgsl);
+    }
+
     #[test]
     fn every_surface_ggx_combo_validates() {
         for st in 0..512u32 {
@@ -426,7 +517,7 @@ mod tests {
             let opts = PsOptions { srgb_read: 1 | 8, srgb_write: st % 2 == 0, alpha_test: (st % 3 == 0).then_some((6, 128)), shadow_depth: 0 };
             validate(&translate_ps(&label, &opts, st % 5 == 0).unwrap().wgsl);
         }
-        for mask in 0..32u32 {
+        for mask in 0..64u32 {
             let present = |u: u8, i: u8| match (u, i) {
                 (0, 0) | (3, 0) | (5, 0) => true,
                 (1, 0) | (2, 0) => mask & 1 != 0,
@@ -435,7 +526,12 @@ mod tests {
                 (0, 1) | (3, 1) => mask & 8 != 0,
                 _ => false,
             };
-            let t = translate_vs(&format!("{}/0+0", ggx::VS), &present, mask & 16 != 0, mask % 3 == 0).unwrap();
+            let packed = |u: u8, _: u8| match (mask & 32 != 0, u) {
+                (true, 3) => Packed::UByte4,
+                (true, 1) => Packed::Short2,
+                _ => Packed::No,
+            };
+            let t = translate_vs(&format!("{}/0+0", ggx::VS), &present, &packed, mask & 16 != 0, mask % 3 == 0).unwrap();
             validate(&t.wgsl);
         }
     }

@@ -46,8 +46,9 @@ pub fn texcoord_size(index: usize, f: VertexFormat) -> usize {
 
 /// vertex format from flags, texcoord dims, bone weights and user data
 pub fn compute_vertex_format(flags: u64, texcoord_count: usize, dims: Option<&[i32]>, bone_weights: usize, user_data: usize) -> VertexFormat {
-    // no compressed vertices (we report none)
-    let mut fmt = flags & !VERTEX_FORMAT_USE_EXACT_FORMAT & !VERTEX_FORMAT_COMPRESSED;
+    // VERTEX_FORMAT_COMPRESSED stays: a shader that takes compressed vertices says so, and the
+    // engine only builds compressed meshes when we report support for them
+    let mut fmt = flags & !VERTEX_FORMAT_USE_EXACT_FORMAT;
     if bone_weights > 0 {
         fmt |= vertex_boneweight(2);
     }
@@ -141,7 +142,11 @@ pub fn compute_vertex_desc(buf: *mut u8, fmt: VertexFormat, desc: &mut VertexDes
     let mut offset = 0usize;
     let mut present: Vec<*mut i32> = Vec::with_capacity(20);
     let at = |o: usize| if buf.is_null() { dummy as *mut u8 } else { unsafe { buf.add(o) } };
-    desc.compression_type = 0;
+    // compressed formats (VERTEX_FORMAT_COMPRESSED): bone weights as short2, normal and tangent
+    // packed together into one ubyte4 (source's "combined tangents" scheme), user data inside the
+    // normal; everything else as uncompressed
+    let compressed = fmt & VERTEX_FORMAT_COMPRESSED != 0;
+    desc.compression_type = compressed as i32;
     if fmt & VERTEX_POSITION != 0 {
         desc.position = at(offset) as *mut f32;
         offset += 12;
@@ -164,7 +169,7 @@ pub fn compute_vertex_desc(buf: *mut u8, fmt: VertexFormat, desc: &mut VertexDes
     if fmt & VERTEX_BONE_INDEX != 0 {
         if desc.num_bone_weights > 0 {
             desc.bone_weight = at(offset) as *mut f32;
-            offset += 8;
+            offset += if compressed { 4 } else { 8 };
             present.push(&mut desc.size_bone_weight);
         } else {
             desc.bone_weight = dummy;
@@ -181,7 +186,7 @@ pub fn compute_vertex_desc(buf: *mut u8, fmt: VertexFormat, desc: &mut VertexDes
     }
     if fmt & VERTEX_NORMAL != 0 {
         desc.normal = at(offset) as *mut f32;
-        offset += 12;
+        offset += if compressed { 4 } else { 12 };
         present.push(&mut desc.size_normal);
     } else {
         desc.normal = dummy;
@@ -230,7 +235,7 @@ pub fn compute_vertex_desc(buf: *mut u8, fmt: VertexFormat, desc: &mut VertexDes
         desc.tangent_t = dummy;
         desc.size_tangent_t = 0;
     }
-    let ud = user_data_size(fmt);
+    let ud = if compressed { 0 } else { user_data_size(fmt) };
     if ud > 0 {
         desc.user_data = at(offset) as *mut f32;
         offset += 4 * ud;
@@ -253,6 +258,10 @@ pub enum ElementType {
     Float(u8),
     /// b g r a bytes
     Color,
+    /// four bytes the shader reads as 0..255 (compressed normal + tangent)
+    UByte4,
+    /// two shorts the shader reads as -32768..32767 (compressed bone weights)
+    Short2,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -277,17 +286,18 @@ pub fn vertex_elements(fmt: VertexFormat) -> Vec<Element> {
     };
     push(0, 0, d.position as usize, fmt & VERTEX_POSITION != 0, ElementType::Float(3));
     let skin = fmt & VERTEX_BONE_INDEX != 0;
-    push(1, 0, d.bone_weight as usize, skin && num_bone_weights(fmt) > 0, ElementType::Float(2));
+    let compressed = fmt & VERTEX_FORMAT_COMPRESSED != 0;
+    push(1, 0, d.bone_weight as usize, skin && num_bone_weights(fmt) > 0, if compressed { ElementType::Short2 } else { ElementType::Float(2) });
     push(2, 0, d.bone_matrix_index as usize, skin, ElementType::Color);
-    push(3, 0, d.normal as usize, fmt & VERTEX_NORMAL != 0, ElementType::Float(3));
+    push(3, 0, d.normal as usize, fmt & VERTEX_NORMAL != 0, if compressed { ElementType::UByte4 } else { ElementType::Float(3) });
     push(10, 0, d.color as usize, fmt & VERTEX_COLOR != 0, ElementType::Color);
     push(10, 1, d.specular as usize, fmt & VERTEX_SPECULAR != 0, ElementType::Color);
     for i in 0..MAX_TEXCOORDS {
         let n = texcoord_size(i, fmt);
         push(5, i as u8, d.texcoord[i] as usize, n > 0, ElementType::Float(n as u8));
     }
-    // tangent comes from user data when present
-    let ud = user_data_size(fmt);
+    // tangent comes from user data when present (inside the normal when compressed)
+    let ud = if compressed { 0 } else { user_data_size(fmt) };
     if ud > 0 {
         push(6, 0, d.user_data as usize, true, ElementType::Float(ud as u8));
     } else {

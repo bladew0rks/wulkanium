@@ -495,14 +495,40 @@ fn consts_struct(name: &str, floats: usize) -> String {
     // last frame's clip space.
     if name == "V" {
         // vs blocks end after the registers a draw needs, so the float array comes last
-        return format!("struct VConsts {{\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n    c: array<vec4f, {floats}>,\n}}\n");
+        // pvp / obj: last frame's view x proj and per-object motion flags (see api::object_motion);
+        // last frame's bone rows follow the floats at api::PREV_BONES
+        let floats = floats + 3 * crate::api::MAX_BONES;
+        return format!("struct VConsts {{\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n    hp: vec4f,\n    clip: array<vec4f, 6>,\n    mvm: array<vec4f, 4>,\n    pvp: array<vec4f, 4>,\n    obj: vec4f,\n    c: array<vec4f, {floats}>,\n}}\n");
     }
     format!("struct {name}Consts {{\n    c: array<vec4f, {floats}>,\n    i: array<vec4<i32>, 16>,\n    b: vec4<u32>,\n}}\n")
 }
 
+/// how a vertex element is packed in the vertex data (source's compressed vertices). the pipeline
+/// reads packed elements as normalized integers; the shader scales them back to the raw values
+/// the stock shaders decompress themselves
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Packed {
+    No,
+    /// unorm8x4 read back as 0..255 (normal + tangent)
+    UByte4,
+    /// snorm16x2 read back as -32767..32767 (bone weights)
+    Short2,
+}
+
+impl Packed {
+    /// wgsl for the raw value of input `v`
+    pub fn raw(self, v: &str) -> String {
+        match self {
+            Packed::No => v.to_string(),
+            Packed::UByte4 => format!("round({v} * 255.0)"),
+            Packed::Short2 => format!("vec4f(round({v}.xy * 32767.0), 0.0, 1.0)"),
+        }
+    }
+}
+
 /// elements missing from the vertex data read as (0, 0, 0, 1). `mv` also outputs this and last
 /// frame's clip position (locations 12 / 13).
-pub fn translate_vs(s: &Shader, present: &dyn Fn(u8, u8) -> bool, clip: bool, mv: bool) -> Result<Translated, String> {
+pub fn translate_vs(s: &Shader, present: &dyn Fn(u8, u8) -> bool, packed: &dyn Fn(u8, u8) -> Packed, clip: bool, mv: bool) -> Result<Translated, String> {
     if s.pixel {
         return Err("not a vertex shader".into());
     }
@@ -531,7 +557,7 @@ pub fn translate_vs(s: &Shader, present: &dyn Fn(u8, u8) -> bool, clip: bool, mv
             let _ = writeln!(out, "    @location({loc}) a{loc}: vec4f,");
             // d3dcolor elements arrive as bgra
             let swz = if matches!(usage, USAGE_COLOR | USAGE_BLENDINDICES) { ".zyxw" } else { "" };
-            let _ = writeln!(loads, "    let v{reg} = vin.a{loc}{swz};");
+            let _ = writeln!(loads, "    let v{reg} = {};", packed(usage, index).raw(&format!("vin.a{loc}{swz}")));
         } else {
             let def = if usage == USAGE_COLOR { "vec4f(1.0)" } else { "vec4f(0.0, 0.0, 0.0, 1.0)" };
             let _ = writeln!(loads, "    let v{reg} = {def};");
@@ -589,12 +615,43 @@ pub fn translate_vs(s: &Shader, present: &dyn Fn(u8, u8) -> bool, clip: bool, mv
     }
     if mv {
         out += "    out.cur = out.pos;\n    out.prev = vec4f(dot(out.pos, V.mvm[0]), dot(out.pos, V.mvm[1]), dot(out.pos, V.mvm[2]), dot(out.pos, V.mvm[3]));\n";
+        let reg = |u: u8| g.inputs.iter().find(|(_, x)| **x == (u, 0)).map(|(r, _)| *r).filter(|_| present(u, 0));
+        if let Some(pos) = reg(USAGE_POSITION) {
+            // compressed weights are raw shorts here: (w + 1) / 32768, as the stock shaders do
+            let weights = reg(USAGE_BLENDWEIGHT).map(|r| {
+                let w = if packed(USAGE_BLENDWEIGHT, 0) == Packed::Short2 { format!("((v{r}.xy + 1.0) / 32768.0)") } else { format!("v{r}.xy") };
+                format!("vec3f({w}.x, {w}.y, 1.0 - {w}.x - {w}.y)")
+            });
+            // d3dcolor bone indices: the load swizzled them to d3d order, the bytes are .zyx
+            let indices = reg(USAGE_BLENDINDICES).map(|r| format!("vec3<i32>(round(v{r}.zyx * 255.0))"));
+            out += &object_motion(&format!("v{pos}"), weights.as_deref(), indices.as_deref());
+        }
     }
     // d3d9 pixel centers sit at integer coords, d3d10+ at +0.5: shift by half a pixel (plus dlss
     // jitter)
     out += "    out.pos = vec4f(out.pos.x + (V.hp.x + V.hp.z) * out.pos.w, out.pos.y - (V.hp.y - V.hp.w) * out.pos.w, out.pos.zw);\n";
     out += "    return out;\n}\n";
     Ok(Translated { wgsl: out, samplers: g.samplers.into_iter().collect(), inputs })
+}
+
+/// adds an object's own motion to out.prev: skin `pos` with last frame's rows and this frame's,
+/// project the difference with last frame's view x proj. shared with the built-in shaders.
+pub fn object_motion(pos: &str, weights: Option<&str>, indices: Option<&str>) -> String {
+    let base = crate::api::PREV_BONES;
+    let mut s = format!(
+        "    if V.obj.x > 0.5 {{\n        let mp = vec4f({pos}.xyz, 1.0);\n        var dw = vec3f(0.0);\n        if V.obj.y < 0.5 {{\n            dw = vec3f(dot(mp, V.c[{base}]), dot(mp, V.c[{b1}]), dot(mp, V.c[{b2}])) - vec3f(dot(mp, V.c[58]), dot(mp, V.c[59]), dot(mp, V.c[60]));\n        }}",
+        b1 = base + 1,
+        b2 = base + 2
+    );
+    if let (Some(w), Some(i)) = (weights, indices) {
+        let _ = write!(
+            s,
+            " else {{\n            let mw = {w};\n            let mi = {i};\n            for (var k = 0; k < 3; k++) {{\n                let b = clamp(mi[k], 0, {max}) * 3;\n                dw += mw[k] * (vec3f(dot(mp, V.c[{base} + b]), dot(mp, V.c[{base} + b + 1]), dot(mp, V.c[{base} + b + 2])) - vec3f(dot(mp, V.c[58 + b]), dot(mp, V.c[59 + b]), dot(mp, V.c[60 + b])));\n            }}\n        }}",
+            max = crate::api::MAX_BONES - 1
+        );
+    }
+    s += "\n        let d = vec4f(dw, 0.0);\n        out.prev += vec4f(dot(d, V.pvp[0]), dot(d, V.pvp[1]), dot(d, V.pvp[2]), dot(d, V.pvp[3]));\n    }\n";
+    s
 }
 
 /// `mv` also writes the motion vector to location 1
@@ -825,7 +882,7 @@ mod tests {
                             Ok(t)
                         })
                     } else {
-                        translate_vs(&s, &|u, _| u != USAGE_TANGENT, rec % 2 == 0, rec % 3 == 0)
+                        translate_vs(&s, &|u, _| u != USAGE_TANGENT, &|u, _| if rec % 4 == 1 && u == USAGE_NORMAL { Packed::UByte4 } else if rec % 4 == 1 && u == USAGE_BLENDWEIGHT { Packed::Short2 } else { Packed::No }, rec % 2 == 0, rec % 3 == 0)
                     };
                     match r.and_then(|t| validate(&t.wgsl).map_err(|e| format!("{e}\n{}", t.wgsl))) {
                         Ok(()) => ok += 1,
@@ -858,7 +915,7 @@ mod dump {
         let dynamic: u32 = std::env::var("DYNAMIC").map(|v| v.parse().unwrap()).unwrap_or(0);
         let code = vcs.static_combo(id).unwrap().into_iter().find(|c| c.0 == dynamic).unwrap().1;
         let s = crate::d3dbc::parse(&code).unwrap();
-        let t = if s.pixel { super::translate_ps(&s, &Default::default(), false) } else { super::translate_vs(&s, &|_, _| true, false, false) }.unwrap();
+        let t = if s.pixel { super::translate_ps(&s, &Default::default(), false) } else { super::translate_vs(&s, &|_, _| true, &|_, _| super::Packed::No, false, false) }.unwrap();
         println!("{}", t.wgsl);
     }
 }

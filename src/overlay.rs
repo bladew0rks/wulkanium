@@ -9,6 +9,12 @@ pub struct Stats {
     /// recording on the game thread
     pub record_ms: f32,
     pub dlss: String,
+    /// built-in shader draws this frame: (shader, draws, distinct static combos)
+    pub builtin_draws: Vec<(String, usize, usize)>,
+    /// (shader, our materials, stock materials)
+    pub materials: Vec<(String, usize, usize)>,
+    /// (effect, on, passes)
+    pub effects: Vec<(String, bool, usize)>,
     /// from timestamp queries, 0 = unavailable
     pub gpu_ms: f32,
     pub vertex_bytes: usize,
@@ -60,16 +66,52 @@ pub struct Overlay {
     last: Instant,
     times: VecDeque<f32>,
     visible: bool,
+    #[allow(dead_code)]
     key_down: bool,
+    /// egui ids of the buffer previews and the texture generation they were registered for
+    previews: Vec<egui::TextureId>,
+    previews_generation: u32,
+}
+
+const BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(8, 9, 11, 225);
+const BORDER: egui::Color32 = egui::Color32::from_rgb(52, 56, 62);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(120, 200, 255);
+const DIM: egui::Color32 = egui::Color32::from_rgb(140, 146, 154);
+
+/// square, borderline, no shadow
+fn panel() -> egui::Frame {
+    egui::Frame::new().fill(BG).stroke(egui::Stroke::new(1.0, BORDER)).inner_margin(8.0)
+}
+
+/// monospace everywhere, a little smaller and tighter than egui's defaults
+fn style(ctx: &egui::Context) {
+    use egui::{FontFamily::Monospace, FontId, TextStyle};
+    ctx.set_visuals(egui::Visuals::dark());
+    let mut st = (*ctx.global_style()).clone();
+    st.text_styles = [
+        (TextStyle::Small, FontId::new(10.0, Monospace)),
+        (TextStyle::Body, FontId::new(12.0, Monospace)),
+        (TextStyle::Button, FontId::new(12.0, Monospace)),
+        (TextStyle::Heading, FontId::new(13.0, Monospace)),
+        (TextStyle::Monospace, FontId::new(12.0, Monospace)),
+    ]
+    .into();
+    st.spacing.item_spacing = egui::vec2(6.0, 2.0);
+    st.visuals.window_shadow = egui::Shadow::NONE;
+    st.visuals.popup_shadow = egui::Shadow::NONE;
+    st.visuals.window_corner_radius = egui::CornerRadius::ZERO;
+    st.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(205, 210, 216);
+    st.visuals.widgets.noninteractive.bg_stroke.color = BORDER;
+    ctx.set_global_style(st);
 }
 
 impl Overlay {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Overlay {
         let ctx = egui::Context::default();
-        ctx.set_visuals(egui::Visuals::dark());
+        style(&ctx);
         let renderer = egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default());
         let now = Instant::now();
-        Overlay { ctx, renderer, start: now, last: now, times: VecDeque::new(), visible: true, key_down: false }
+        Overlay { ctx, renderer, start: now, last: now, times: VecDeque::new(), visible: true, key_down: false, previews: Vec::new(), previews_generation: 0 }
     }
 
     fn poll_toggle(&mut self) {
@@ -84,7 +126,7 @@ impl Overlay {
         }
     }
 
-    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, stats: &Stats) {
+    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, stats: &Stats, previews: Option<(u32, Vec<&wgpu::TextureView>)>) {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32() * 1000.0;
         self.last = now;
@@ -93,6 +135,23 @@ impl Overlay {
             self.times.pop_front();
         }
         self.poll_toggle();
+        crate::effects::set_previews(self.visible);
+        // (re)register the preview textures when the effects recreated them
+        if let Some((generation, views)) = &previews {
+            if *generation != self.previews_generation || self.previews.len() != views.len() {
+                for (i, v) in views.iter().enumerate() {
+                    match self.previews.get(i) {
+                        Some(&id) => self.renderer.update_egui_texture_from_wgpu_texture(device, v, wgpu::FilterMode::Linear, id),
+                        None => self.previews.push(self.renderer.register_native_texture(device, v, wgpu::FilterMode::Linear)),
+                    }
+                }
+                self.previews_generation = *generation;
+            }
+        }
+        let preview_ids: Vec<(egui::TextureId, [f32; 2])> = match &previews {
+            Some((_, views)) => self.previews.iter().zip(views).map(|(id, v)| (*id, [v.texture().width() as f32, v.texture().height() as f32])).collect(),
+            None => Vec::new(),
+        };
         let notices: Vec<(String, bool, f32)> = {
             let mut n = NOTICES.lock().unwrap_or_else(|e| e.into_inner());
             n.retain(|x| x.2.elapsed().as_secs_f32() < NOTICE_SECS);
@@ -112,9 +171,11 @@ impl Overlay {
         let worst = times.iter().copied().fold(0.0f32, f32::max);
         let visible = self.visible;
         let output = self.ctx.run_pass(input, |ctx| {
+            // notices go under the buffer previews when those are up
+            let notice_y = if visible && !preview_ids.is_empty() { 8.0 + preview_ids[0].1[1] + 40.0 } else { 8.0 };
             if !notices.is_empty() {
-                egui::Area::new(egui::Id::unique("notices")).anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0)).show(ctx, |ui| {
-                    egui::Frame::new().fill(egui::Color32::from_black_alpha(170)).inner_margin(6.0).corner_radius(3.0).show(ui, |ui| {
+                egui::Area::new(egui::Id::unique("notices")).anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, notice_y)).show(ctx, |ui| {
+                    egui::Frame::new().fill(BG).inner_margin(6.0).show(ui, |ui| {
                         for (text, error, age) in &notices {
                             // fade over the last second
                             let alpha = ((NOTICE_SECS - age).min(1.0) * 255.0) as u8;
@@ -127,14 +188,28 @@ impl Overlay {
             if !visible {
                 return;
             }
-            egui::Window::new("wgpu").title_bar(false).resizable(false).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0)).show(ctx, |ui| {
-                ui.label(egui::RichText::new(format!("shaderapiwgpu · wgpu 30 · {}", stats.backend)).strong().color(egui::Color32::from_rgb(120, 200, 255)));
-                ui.label(&stats.adapter);
+            if !preview_ids.is_empty() {
+                egui::Area::new(egui::Id::unique("previews")).anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0)).show(ctx, |ui| {
+                    panel().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for ((id, [w, h]), name) in preview_ids.iter().zip(crate::effects::PREVIEWS) {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(name).color(DIM));
+                                    ui.image(egui::load::SizedTexture::new(*id, egui::vec2(*w, *h)));
+                                });
+                            }
+                        });
+                    });
+                });
+            }
+            egui::Window::new("wgpu").title_bar(false).resizable(false).frame(panel()).anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0)).show(ctx, |ui| {
+                ui.label(egui::RichText::new(format!("{} / wgpu", stats.backend)).strong().color(ACCENT));
+                ui.label(egui::RichText::new(&stats.adapter).color(DIM));
                 ui.label(format!("{:.0} fps · {avg:.2} ms avg · {worst:.1} ms worst · {}", 1000.0 / avg.max(0.001), stats.present_mode));
                 // last 240 frames, scaled to max(33 ms, worst)
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(260.0, 48.0), egui::Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(120));
+                p.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(140));
                 let top = worst.max(33.3);
                 let y = |t: f32| rect.bottom() - (t / top).min(1.0) * rect.height();
                 for line in [16.7f32, 33.3] {
@@ -148,7 +223,7 @@ impl Overlay {
                     ui.separator();
                     egui::Grid::new(id).num_columns(2).spacing([16.0, 2.0]).show(ui, |ui| {
                         for (k, v) in rows {
-                            ui.label(k);
+                            ui.label(egui::RichText::new(k).color(DIM));
                             ui.label(v);
                             ui.end_row();
                         }
@@ -173,6 +248,22 @@ impl Overlay {
                     ("new pipelines", stats.new_pipelines.to_string()),
                     ("DLSS", stats.dlss.clone()),
                 ]);
+                let mut custom: Vec<(String, String)> = Vec::new();
+                for (name, ours, stock) in &stats.materials {
+                    let (draws, combos) = stats.builtin_draws.iter().find(|b| b.0.eq_ignore_ascii_case(name)).map_or((0, 0), |b| (b.1, b.2));
+                    let mut v = format!("{ours} materials · {draws} draws · {combos} combos");
+                    if *stock > 0 {
+                        v += &format!(" · {stock} on stock");
+                    }
+                    custom.push((name.clone(), v));
+                }
+                for (name, on, passes) in &stats.effects {
+                    custom.push((name.clone(), format!("{} · {passes} pass{}", if *on { "on" } else { "off" }, if *passes == 1 { "" } else { "es" })));
+                }
+                if stats.effects.is_empty() {
+                    custom.push(("effects".into(), "none loaded".into()));
+                }
+                section(ui, "custom", custom.iter().map(|(k, v)| (k.as_str(), v.clone())).collect());
                 section(ui, "caches", vec![
                     ("pipelines", stats.pipelines.to_string()),
                     ("shader modules", stats.shader_modules.to_string()),
